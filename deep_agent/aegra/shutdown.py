@@ -323,9 +323,9 @@ def _clear_graph_cache() -> str:
 def _shutdown_otel() -> str:
     """Shutdown OpenTelemetry providers and flush pending telemetry."""
     try:
-        from deep_agent.aegra.otel import shutdown_otel
+        from deep_agent.aegra.otel import shutdown_telemetry
 
-        shutdown_otel()
+        shutdown_telemetry()
         return "ok"
     except Exception as exc:
         logger.warning("OTEL shutdown failed: %s", exc)

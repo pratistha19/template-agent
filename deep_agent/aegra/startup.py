@@ -141,9 +141,9 @@ async def _start_scheduler() -> str:
 def _setup_otel() -> str:
     """Initialize OpenTelemetry metrics and tracing."""
     try:
-        from deep_agent.aegra.otel import setup_otel
+        from deep_agent.aegra.otel import initialize_telemetry
 
-        setup_otel()
+        initialize_telemetry()
         return "ok"
     except Exception as exc:
         logger.warning("OTEL setup failed: %s", exc)

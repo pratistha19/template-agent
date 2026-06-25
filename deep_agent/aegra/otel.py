@@ -527,7 +527,7 @@ def instrument_fastapi(app: Any) -> None:
 
 def shutdown_telemetry() -> None:
     """Flush and shut down both meter and tracer providers."""
-    global _initialized, _tracer_provider, _meter, _metrics_container, _snapshot_reader
+    global _initialized, _tracer_provider, _meter, _metrics_container, _snapshot_reader, _resolved_version
 
     if _tracer_provider is not None and hasattr(_tracer_provider, "shutdown"):
         _tracer_provider.shutdown()
@@ -541,6 +541,7 @@ def shutdown_telemetry() -> None:
     _meter = None
     _metrics_container = None
     _snapshot_reader = None
+    _resolved_version = None  # Clear cached version for clean re-initialization
 
     reset_thread_active_tracking()
     _initialized = False

@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     LANGFUSE_BASE_URL: Optional[str] = Field(default=None)
     LANGFUSE_TRACING_ENVIRONMENT: str = Field(default="development")
 
+    # ── Observability (OpenTelemetry) ─────────────────────────────────
+    ENABLE_OTEL: bool = Field(default=False)
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = Field(default="http://localhost:4317")
+
     # ── Google Cloud ──────────────────────────────────────────────────
     GOOGLE_APPLICATION_CREDENTIALS_CONTENT: Optional[str] = Field(default=None)
 

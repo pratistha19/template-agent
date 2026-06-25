@@ -48,6 +48,10 @@ _DEFAULT_SERVICE_VERSION = "dev"
 MIN_EXPORT_INTERVAL_MS = 1000
 MAX_EXPORT_INTERVAL_MS = 60000
 
+# Cached service version (populated on first resolution)
+_resolved_version: Optional[str] = None
+_version_lock = threading.Lock()
+
 DURATION_BUCKETS = [
     0.1,
     0.25,
@@ -222,7 +226,7 @@ def _resolve_service_name() -> str:
     """Resolve service name from agent config with unique fallback.
 
     Returns service name from agent config. If config loading fails,
-    falls back to hostname-based unique name and logs an error.
+    falls back to hostname+PID-based unique name and logs an error.
 
     Returns:
         Service name string (may contain hyphens or underscores)
@@ -232,12 +236,14 @@ def _resolve_service_name() -> str:
 
         return agent_config.get_name()
     except Exception as exc:
-        # Use hostname to ensure unique metric namespace per pod
+        # Use hostname + PID to guarantee uniqueness even on the same host
         hostname = socket.gethostname()
-        fallback = f"{_DEFAULT_SERVICE_NAME}-{hostname}"
+        pid = os.getpid()
+        fallback = f"{_DEFAULT_SERVICE_NAME}-{hostname}-{pid}"
         logger.error(
-            "Failed to resolve service name from config, using hostname-based fallback '%s'. "
-            "This may cause metric namespace issues in multi-agent deployments. Error: %s",
+            "Failed to resolve service name from config, using hostname+PID fallback '%s'. "
+            "This may cause metric namespace fragmentation in multi-agent deployments. "
+            "Fix agent config loading to resolve this. Error: %s",
             fallback,
             exc,
         )
@@ -248,40 +254,55 @@ def _resolve_service_version() -> str:
     """Resolve service version from env var, package metadata, or pyproject.toml.
 
     Resolution order:
-    1. APPLICATION_VERSION environment variable (Kubernetes deployments)
-    2. Package metadata via importlib.metadata.version
-    3. pyproject.toml version field (development)
+    1. APPLICATION_VERSION environment variable (Kubernetes deployments) — not cached
+    2. Package metadata via importlib.metadata.version — cached after first read
+    3. pyproject.toml version field (development) — cached after first read
     4. Fallback to "dev"
 
     Returns:
         Version string (e.g., "1.2.3", "dev")
     """
-    # Try env var first (production deployments)
+    global _resolved_version
+
+    # Try env var first (production deployments, can change at runtime)
     version = os.environ.get("APPLICATION_VERSION")
     if version:
         return version
 
-    # Try package metadata
-    try:
-        from importlib.metadata import version as pkg_version
-        return pkg_version("deep-agent")
-    except Exception:
-        pass
+    # Use cached value if available
+    if _resolved_version is not None:
+        return _resolved_version
 
-    # Try reading from pyproject.toml (development)
-    try:
-        pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
-        if pyproject_path.exists():
-            import tomllib
-            with open(pyproject_path, "rb") as f:
-                data = tomllib.load(f)
-                proj_version = data.get("project", {}).get("version")
-                if proj_version:
-                    return proj_version
-    except Exception:
-        pass
+    with _version_lock:
+        # Double-check after acquiring lock
+        if _resolved_version is not None:
+            return _resolved_version
 
-    return _DEFAULT_SERVICE_VERSION
+        # Try package metadata
+        try:
+            from importlib.metadata import version as pkg_version
+            resolved = pkg_version("deep-agent")
+            _resolved_version = resolved
+            return resolved
+        except Exception:
+            pass
+
+        # Try reading from pyproject.toml (development)
+        try:
+            pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+            if pyproject_path.exists():
+                import tomllib
+                with open(pyproject_path, "rb") as f:
+                    data = tomllib.load(f)
+                    proj_version = data.get("project", {}).get("version")
+                    if proj_version:
+                        _resolved_version = proj_version
+                        return proj_version
+        except Exception:
+            pass
+
+        _resolved_version = _DEFAULT_SERVICE_VERSION
+        return _DEFAULT_SERVICE_VERSION
 
 
 def _resolve_config() -> tuple[bool, str, bool, int, bool]:
@@ -492,10 +513,12 @@ def instrument_fastapi(app: Any) -> None:
 
         FastAPIInstrumentor.instrument_app(app)
         logger.info("FastAPI auto-instrumentation enabled")
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError) as exc:
         # Package missing or incompatible version
         logger.warning(
-            "FastAPI instrumentation unavailable (check opentelemetry-instrumentation-fastapi)"
+            "FastAPI instrumentation unavailable: %s. "
+            "Check opentelemetry-instrumentation-fastapi version compatibility.",
+            exc,
         )
     except Exception:
         # Unexpected failure, log full trace
@@ -504,7 +527,7 @@ def instrument_fastapi(app: Any) -> None:
 
 def shutdown_telemetry() -> None:
     """Flush and shut down both meter and tracer providers."""
-    global _initialized, _tracer_provider
+    global _initialized, _tracer_provider, _meter, _metrics_container, _snapshot_reader
 
     if _tracer_provider is not None and hasattr(_tracer_provider, "shutdown"):
         _tracer_provider.shutdown()
@@ -513,6 +536,11 @@ def shutdown_telemetry() -> None:
     meter_provider = metrics.get_meter_provider()
     if hasattr(meter_provider, "shutdown"):
         meter_provider.shutdown()
+
+    # Clear all module-level state
+    _meter = None
+    _metrics_container = None
+    _snapshot_reader = None
 
     reset_thread_active_tracking()
     _initialized = False

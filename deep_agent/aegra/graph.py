@@ -96,6 +96,9 @@ async def agent(runtime: ServerRuntime) -> Any:
     """
     await _ensure_startup()
 
+    # Start timing graph build for OTEL metrics
+    build_start_mono = time.monotonic()
+
     from deepagents import create_deep_agent
 
     from deep_agent.aegra.mcp import (
@@ -221,6 +224,17 @@ async def agent(runtime: ServerRuntime) -> Any:
     if cached is not None and (now - _graph_cache_ts.get(cache_key, 0)) < graph_ttl:
         age = now - _graph_cache_ts[cache_key]
         logger.warning("Graph cache HIT (age=%.1fs) — skipping rebuild", age)
+
+        # Record cache hit metric
+        from deep_agent.aegra.otel import record_graph_built
+        mcp_tool_count = sum(1 for t in tools if t.name.startswith("mcp__"))
+        record_graph_built(
+            build_start_mono,
+            cache_hit=True,
+            mcp_tool_count=mcp_tool_count,
+            attributes={"model": model_name, "agent": agent_name},
+        )
+
         return cached
 
     logger.warning("Graph cache MISS — full rebuild")
@@ -283,6 +297,16 @@ async def agent(runtime: ServerRuntime) -> Any:
         sub_count,
         len(middleware),
         bool(sso_token),
+    )
+
+    # Record cache miss metric (graph was built)
+    from deep_agent.aegra.otel import record_graph_built
+    mcp_tool_count = sum(1 for t in tools if t.name.startswith("mcp__"))
+    record_graph_built(
+        build_start_mono,
+        cache_hit=False,
+        mcp_tool_count=mcp_tool_count,
+        attributes={"model": model_name, "agent": agent_name},
     )
 
     return compiled

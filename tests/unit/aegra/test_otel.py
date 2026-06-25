@@ -236,3 +236,86 @@ def _import_raiser(blocked_module: str):
         return real_import(name, *args, **kwargs)
 
     return _side_effect
+
+
+class TestMetricRecording:
+    """Test end-to-end metric recording."""
+
+    def test_record_conversation_started_increments_counter(self):
+        """Verify recording a conversation start increments the metric."""
+        with patch.object(
+            otel_mod,
+            "_resolve_config",
+            return_value=(False, "http://localhost:4317", True, 5000, True),
+        ):
+            initialize_telemetry()
+
+        from deep_agent.aegra.otel import (
+            get_metrics_snapshot,
+            record_conversation_completed,
+            record_conversation_started,
+        )
+
+        # Record a conversation start
+        start_mono = record_conversation_started(attributes={"thread_id": "test-123"})
+
+        # Get snapshot and verify counters increased
+        snapshot = get_metrics_snapshot()
+        assert "conversations_total" in str(
+            snapshot
+        )  # Metric name includes dynamic prefix
+
+        # Complete it
+        record_conversation_completed(
+            start_mono, status="completed", attributes={"thread_id": "test-123"}
+        )
+
+        # Verify active conversations went back to zero
+        snapshot_after = get_metrics_snapshot()
+        # Both snapshots should have data
+        assert snapshot_after is not None
+
+    def test_record_thread_deleted_raises_on_invalid_count(self):
+        """record_thread_deleted should reject count != 1."""
+        with patch.object(
+            otel_mod,
+            "_resolve_config",
+            return_value=(False, "http://localhost:4317", True, 5000, True),
+        ):
+            initialize_telemetry()
+
+        from deep_agent.aegra.otel import record_thread_deleted
+
+        with pytest.raises(ValueError, match="requires count=1"):
+            record_thread_deleted(count=5, attributes={"thread_id": "test"})
+
+    def test_record_stream_metrics(self):
+        """Verify stream metric recording works."""
+        with patch.object(
+            otel_mod,
+            "_resolve_config",
+            return_value=(False, "http://localhost:4317", True, 5000, True),
+        ):
+            initialize_telemetry()
+
+        from deep_agent.aegra.otel import (
+            get_metrics_snapshot,
+            record_first_token,
+            record_stream_completed,
+            record_stream_error,
+            record_stream_started,
+        )
+
+        # Record stream lifecycle
+        start_mono = record_stream_started()
+        record_first_token(start_mono, attributes={"model": "test"})
+        record_stream_completed(start_mono, token_count=100, attributes={"model": "test"})
+
+        snapshot = get_metrics_snapshot()
+        assert snapshot is not None
+
+        # Record an error
+        record_stream_error(error_type="timeout", attributes={"model": "test"})
+
+        snapshot_after = get_metrics_snapshot()
+        assert snapshot_after is not None

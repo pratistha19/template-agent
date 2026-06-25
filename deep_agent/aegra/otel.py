@@ -113,69 +113,76 @@ _threads_active_lock = threading.Lock()
 class MetricsContainer:
     """Container for all template agent OpenTelemetry metric instruments."""
 
-    def __init__(self, meter: metrics.Meter) -> None:
-        """Create all metric instruments on the given meter."""
-        prefix = "template_agent"
+    def __init__(self, meter: metrics.Meter, prefix: Optional[str] = None) -> None:
+        """Create all metric instruments on the given meter.
+
+        Args:
+            meter: OpenTelemetry meter instance
+            prefix: Metric name prefix (defaults to service name from config)
+        """
+        if prefix is None:
+            prefix = _resolve_service_name().replace("-", "_")
+        self._prefix = prefix
 
         self.conversations_total = meter.create_counter(
-            name=f"{prefix}_conversations_total",
+            name=f"{self._prefix}_conversations_total",
             description="Total conversations by status",
             unit="1",
         )
         self.messages_total = meter.create_counter(
-            name=f"{prefix}_messages_total",
+            name=f"{self._prefix}_messages_total",
             description="Messages sent/received",
             unit="1",
         )
         self.conversation_duration_seconds = meter.create_histogram(
-            name=f"{prefix}_conversation_duration_seconds",
+            name=f"{self._prefix}_conversation_duration_seconds",
             description="Time from conversation start to completion",
             unit="s",
         )
         self.active_conversations = meter.create_up_down_counter(
-            name=f"{prefix}_active_conversations",
+            name=f"{self._prefix}_active_conversations",
             description="Currently active conversations",
             unit="1",
         )
 
         self.stream_tokens_total = meter.create_counter(
-            name=f"{prefix}_stream_tokens_total",
+            name=f"{self._prefix}_stream_tokens_total",
             description="Tokens streamed to clients",
             unit="1",
         )
         self.stream_duration_seconds = meter.create_histogram(
-            name=f"{prefix}_stream_duration_seconds",
+            name=f"{self._prefix}_stream_duration_seconds",
             description="Time to complete stream",
             unit="s",
         )
         self.stream_errors_total = meter.create_counter(
-            name=f"{prefix}_stream_errors_total",
+            name=f"{self._prefix}_stream_errors_total",
             description="Stream failures by type",
             unit="1",
         )
         self.time_to_first_token_seconds = meter.create_histogram(
-            name=f"{prefix}_time_to_first_token_seconds",
+            name=f"{self._prefix}_time_to_first_token_seconds",
             description="Latency until first token",
             unit="s",
         )
 
         self.threads_created_total = meter.create_counter(
-            name=f"{prefix}_threads_created_total",
+            name=f"{self._prefix}_threads_created_total",
             description="New threads created",
             unit="1",
         )
         self.threads_active = meter.create_up_down_counter(
-            name=f"{prefix}_threads_active",
+            name=f"{self._prefix}_threads_active",
             description="Currently active threads",
             unit="1",
         )
         self.threads_deleted_total = meter.create_counter(
-            name=f"{prefix}_threads_deleted_total",
+            name=f"{self._prefix}_threads_deleted_total",
             description="Threads deleted",
             unit="1",
         )
         self.thread_messages_count = meter.create_histogram(
-            name=f"{prefix}_thread_messages_count",
+            name=f"{self._prefix}_thread_messages_count",
             description="Messages per thread",
             unit="1",
         )
@@ -229,11 +236,23 @@ def _resolve_config() -> tuple[bool, str, bool, int, bool]:
         ).lower()
         == "true"
     )
-    export_interval = int(
+    export_interval_raw = int(
         os.environ.get(
             "OTEL_METRIC_EXPORT_INTERVAL", str(cfg.metrics.export_interval_ms)
         )
     )
+    # Validate export_interval is within allowed range (same as Pydantic model)
+    if not (1000 <= export_interval_raw <= 60000):
+        logger.warning(
+            "OTEL_METRIC_EXPORT_INTERVAL=%d outside valid range [1000, 60000], "
+            "using config default %d",
+            export_interval_raw,
+            cfg.metrics.export_interval_ms,
+        )
+        export_interval = cfg.metrics.export_interval_ms
+    else:
+        export_interval = export_interval_raw
+
     auto_instrument = cfg.tracing.fastapi_auto_instrument
 
     return enabled, endpoint, insecure, export_interval, auto_instrument
@@ -255,9 +274,14 @@ def _build_resource() -> Resource:
     )
 
 
-def _create_histogram_views() -> list[View]:
-    """Create histogram bucket views for metrics."""
-    prefix = "template_agent"
+def _create_histogram_views(prefix: Optional[str] = None) -> list[View]:
+    """Create histogram bucket views for metrics.
+
+    Args:
+        prefix: Metric name prefix (defaults to service name from config)
+    """
+    if prefix is None:
+        prefix = _resolve_service_name().replace("-", "_")
     return [
         View(
             instrument_name=f"{prefix}_conversation_duration_seconds",
@@ -299,8 +323,10 @@ def initialize_telemetry() -> None:
     enabled, endpoint, insecure, export_interval, _ = _resolve_config()
     _otel_enabled = enabled
 
+    service_name = _resolve_service_name()
     resource = _build_resource()
-    views = _create_histogram_views()
+    metric_prefix = service_name.replace("-", "_")
+    views = _create_histogram_views(prefix=metric_prefix)
 
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -357,9 +383,8 @@ def initialize_telemetry() -> None:
     # get_tracer() which reads _tracer_provider directly.
     trace.set_tracer_provider(tracer_provider)
 
-    service_name = _resolve_service_name()
     _meter = meter_provider.get_meter(service_name, SERVICE_VERSION)
-    _metrics_container = MetricsContainer(_meter)
+    _metrics_container = MetricsContainer(_meter, prefix=metric_prefix)
     _initialized = True
 
 

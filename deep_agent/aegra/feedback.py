@@ -69,11 +69,15 @@ def _patch_aegra_persistence_if_inmemory() -> None:
 
 _patch_aegra_persistence_if_inmemory()
 
+from deep_agent.aegra.otel import instrument_fastapi
 from deep_agent.aegra.shutdown import register_atexit
 
 register_atexit()
 
 app = FastAPI(title="template-agent-custom")
+
+# Enable OpenTelemetry distributed tracing for FastAPI
+instrument_fastapi(app)
 
 
 class TraceIDMiddleware(BaseHTTPMiddleware):

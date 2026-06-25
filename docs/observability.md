@@ -201,7 +201,21 @@ All metrics use prefix `template_agent_`.
 
 ## Instrumentation Status
 
-The OTEL module defines `record_*` helpers for all metrics, but they are **not yet wired** to runtime code. To enable metric recording:
+⚠️ **IMPORTANT:** The OTEL module defines `record_*` helpers for all metrics, but they are **not yet wired** to runtime code. This means:
+
+- **Metrics will report zero values** until instrumentation calls are added
+- **FastAPI auto-instrumentation is enabled** - HTTP request tracing works out of the box
+- **Metric infrastructure is ready** - counters, gauges, and histograms are all defined
+
+### Current Status
+
+✅ **Working Now:**
+- OTLP metric/trace export to collector
+- FastAPI distributed tracing (HTTP spans, W3C trace context propagation)
+- In-memory metric snapshot for debugging
+
+⏳ **Requires Wiring:**
+To enable metric recording, add instrumentation calls at these points:
 
 1. **Conversations**: Call `record_conversation_started()` at conversation lifecycle start, `record_conversation_completed()` at end
 2. **Messages**: Call `record_message_sent()` in message ingress/egress handlers
@@ -209,6 +223,21 @@ The OTEL module defines `record_*` helpers for all metrics, but they are **not y
 4. **Threads**: Call `record_thread_created()`, `record_thread_deleted()` in thread management APIs
 
 See `deep_agent/aegra/otel.py` for full API.
+
+### Example Instrumentation
+
+```python
+from deep_agent.aegra.otel import record_conversation_started, record_conversation_completed
+
+async def handle_conversation(thread_id: str):
+    start_mono = record_conversation_started(attributes={"thread_id": thread_id})
+    try:
+        # ... conversation logic ...
+        record_conversation_completed(start_mono, status="completed")
+    except Exception as e:
+        record_conversation_completed(start_mono, status="error")
+        raise
+```
 
 ## Configuration Reference
 

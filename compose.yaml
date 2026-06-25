@@ -8,7 +8,7 @@
 ##   make demo          - Clone repos, configure, start full stack
 ##   make clean         - Stop stack, remove data + cloned repos
 ##
-## Observability profile:  Adds OTEL collector + Jaeger + Prometheus
+## Observability profile:  Adds Jaeger + Prometheus
 ##   docker compose --profile observability up
 ##   Set ENABLE_OTEL=true in .env to enable metrics/tracing export
 ##
@@ -22,7 +22,6 @@
 ##   template-ui           - React/Fastify frontend with SSO auth (port 8080)
 ##
 ## Services (observability profile):
-##   otel-collector        - OpenTelemetry collector (OTLP grpc :4317, http :4318, metrics :8889)
 ##   jaeger                - Jaeger UI for trace visualization (UI :16686)
 ##   prometheus            - Prometheus metrics storage (UI :9090)
 
@@ -118,9 +117,9 @@ services:
       - POSTGRES_PASSWORD=postgres
       - REDIS_URL=redis://redis:6379/0
       - REDIS_BROKER_ENABLED=true
-      # OTEL: Uncomment when using --profile observability
+      # OTEL: Set endpoint to your observability backend (e.g., Jaeger, managed service)
       # - ENABLE_OTEL=true
-      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     depends_on:
       pgvector:
         condition: service_healthy
@@ -172,28 +171,6 @@ services:
 
   # ── Observability Stack ──────────────────────────────────────────────
 
-  otel-collector:
-    profiles: [observability]
-    image: otel/opentelemetry-collector-contrib:0.96.0
-    container_name: demo-otel-collector
-    command: ["--config=/etc/otelcol/config.yaml"]
-    ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
-      - "8889:8889"   # Prometheus exporter
-      - "13133:13133" # Health check
-    volumes:
-      - ./scripts/observability/local-otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - demo-network
-
   jaeger:
     profiles: [observability]
     image: jaegertracing/all-in-one:1.55
@@ -222,9 +199,6 @@ services:
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
     restart: unless-stopped
-    depends_on:
-      otel-collector:
-        condition: service_healthy
     networks:
       - demo-network
 

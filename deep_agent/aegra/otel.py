@@ -21,8 +21,10 @@ Currently, these helpers are defined but not yet called from runtime modules.
 """
 
 import os
+import socket
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from opentelemetry import metrics, trace
@@ -38,8 +40,13 @@ from deep_agent.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
-SERVICE_NAME = "template-agent"
-SERVICE_VERSION = "1.0.0"
+# Default fallback values - only used when config loading fails
+_DEFAULT_SERVICE_NAME = "template-agent"
+_DEFAULT_SERVICE_VERSION = "dev"
+
+# Config validation constants
+MIN_EXPORT_INTERVAL_MS = 1000
+MAX_EXPORT_INTERVAL_MS = 60000
 
 DURATION_BUCKETS = [
     0.1,
@@ -202,15 +209,79 @@ class MetricsContainer:
         self.threads_deleted_total.add(0)
         self.thread_messages_count.record(0)
 
+        # Graph build metric
+        self.graph_build_duration_seconds = meter.create_histogram(
+            name=f"{self._prefix}_graph_build_duration_seconds",
+            description="Time to build and compile graph",
+            unit="s",
+        )
+        self.graph_build_duration_seconds.record(0)
+
 
 def _resolve_service_name() -> str:
-    """Resolve service name from agent config, fall back to default."""
+    """Resolve service name from agent config with unique fallback.
+
+    Returns service name from agent config. If config loading fails,
+    falls back to hostname-based unique name and logs an error.
+
+    Returns:
+        Service name string (may contain hyphens or underscores)
+    """
     try:
         from deep_agent.src.agent.config import agent_config
 
         return agent_config.get_name()
+    except Exception as exc:
+        # Use hostname to ensure unique metric namespace per pod
+        hostname = socket.gethostname()
+        fallback = f"{_DEFAULT_SERVICE_NAME}-{hostname}"
+        logger.error(
+            "Failed to resolve service name from config, using hostname-based fallback '%s'. "
+            "This may cause metric namespace issues in multi-agent deployments. Error: %s",
+            fallback,
+            exc,
+        )
+        return fallback
+
+
+def _resolve_service_version() -> str:
+    """Resolve service version from env var, package metadata, or pyproject.toml.
+
+    Resolution order:
+    1. APPLICATION_VERSION environment variable (Kubernetes deployments)
+    2. Package metadata via importlib.metadata.version
+    3. pyproject.toml version field (development)
+    4. Fallback to "dev"
+
+    Returns:
+        Version string (e.g., "1.2.3", "dev")
+    """
+    # Try env var first (production deployments)
+    version = os.environ.get("APPLICATION_VERSION")
+    if version:
+        return version
+
+    # Try package metadata
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version("deep-agent")
     except Exception:
-        return SERVICE_NAME
+        pass
+
+    # Try reading from pyproject.toml (development)
+    try:
+        pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+        if pyproject_path.exists():
+            import tomllib
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+                proj_version = data.get("project", {}).get("version")
+                if proj_version:
+                    return proj_version
+    except Exception:
+        pass
+
+    return _DEFAULT_SERVICE_VERSION
 
 
 def _resolve_config() -> tuple[bool, str, bool, int, bool]:
@@ -242,14 +313,25 @@ def _resolve_config() -> tuple[bool, str, bool, int, bool]:
         )
     )
     # Validate export_interval is within allowed range (same as Pydantic model)
-    if not (1000 <= export_interval_raw <= 60000):
+    if not (MIN_EXPORT_INTERVAL_MS <= export_interval_raw <= MAX_EXPORT_INTERVAL_MS):
         logger.warning(
-            "OTEL_METRIC_EXPORT_INTERVAL=%d outside valid range [1000, 60000], "
-            "using config default %d",
+            "OTEL_METRIC_EXPORT_INTERVAL=%d outside valid range [%d, %d], "
+            "checking config default",
             export_interval_raw,
-            cfg.metrics.export_interval_ms,
+            MIN_EXPORT_INTERVAL_MS,
+            MAX_EXPORT_INTERVAL_MS,
         )
-        export_interval = cfg.metrics.export_interval_ms
+        # Validate config default is also within range
+        if not (MIN_EXPORT_INTERVAL_MS <= cfg.metrics.export_interval_ms <= MAX_EXPORT_INTERVAL_MS):
+            logger.error(
+                "Config default export_interval_ms=%d also outside valid range, "
+                "using minimum allowed value %d",
+                cfg.metrics.export_interval_ms,
+                MIN_EXPORT_INTERVAL_MS,
+            )
+            export_interval = MIN_EXPORT_INTERVAL_MS
+        else:
+            export_interval = cfg.metrics.export_interval_ms
     else:
         export_interval = export_interval_raw
 
@@ -261,7 +343,7 @@ def _resolve_config() -> tuple[bool, str, bool, int, bool]:
 def _build_resource() -> Resource:
     """Build the OTel resource with service metadata."""
     environment = os.environ.get("ENVIRONMENT", "dev")
-    version = os.environ.get("APPLICATION_VERSION", SERVICE_VERSION)
+    version = _resolve_service_version()
     instance_id = os.environ.get("HOSTNAME", "local")
 
     return Resource.create(
@@ -300,6 +382,10 @@ def _create_histogram_views(prefix: Optional[str] = None) -> list[View]:
             aggregation=ExplicitBucketHistogramAggregation(
                 boundaries=MESSAGES_COUNT_BUCKETS,
             ),
+        ),
+        View(
+            instrument_name=f"{prefix}_graph_build_duration_seconds",
+            aggregation=ExplicitBucketHistogramAggregation(boundaries=DURATION_BUCKETS),
         ),
     ]
 
@@ -383,7 +469,8 @@ def initialize_telemetry() -> None:
     # get_tracer() which reads _tracer_provider directly.
     trace.set_tracer_provider(tracer_provider)
 
-    _meter = meter_provider.get_meter(service_name, SERVICE_VERSION)
+    service_version = _resolve_service_version()
+    _meter = meter_provider.get_meter(service_name, service_version)
     _metrics_container = MetricsContainer(_meter, prefix=metric_prefix)
     _initialized = True
 
@@ -405,10 +492,14 @@ def instrument_fastapi(app: Any) -> None:
 
         FastAPIInstrumentor.instrument_app(app)
         logger.info("FastAPI auto-instrumentation enabled")
-    except ImportError:
-        logger.warning("opentelemetry-instrumentation-fastapi not installed — skipping")
+    except (ImportError, AttributeError):
+        # Package missing or incompatible version
+        logger.warning(
+            "FastAPI instrumentation unavailable (check opentelemetry-instrumentation-fastapi)"
+        )
     except Exception:
-        logger.warning("FastAPI instrumentation failed", exc_info=True)
+        # Unexpected failure, log full trace
+        logger.error("FastAPI instrumentation failed", exc_info=True)
 
 
 def shutdown_telemetry() -> None:
@@ -432,7 +523,7 @@ def get_metrics() -> Optional[MetricsContainer]:
     return _metrics_container
 
 
-def get_tracer(name: str = "template-agent") -> trace.Tracer:
+def get_tracer(name: Optional[str] = None) -> trace.Tracer:
     """Return a tracer from the module-owned TracerProvider.
 
     Uses ``_tracer_provider`` (set during ``initialize_telemetry``) rather
@@ -441,11 +532,13 @@ def get_tracer(name: str = "template-agent") -> trace.Tracer:
     no-op ``ProxyTracerProvider``).
 
     Args:
-        name: Instrumentation scope name for the tracer.
+        name: Instrumentation scope name (defaults to service name from config)
 
     Returns:
         An OTEL ``Tracer`` instance.
     """
+    if name is None:
+        name = _resolve_service_name()
     if _tracer_provider is not None:
         return _tracer_provider.get_tracer(name)
     return trace.get_tracer(name)
@@ -616,15 +709,23 @@ def record_thread_created(
     m = get_metrics()
     if not m:
         return
+
     merged = _attrs(attributes)
     thread_id = merged.get("thread_id")
-    with _threads_active_lock:
-        if thread_id and thread_id in _threads_active_tracked:
-            return
-        if thread_id:
-            _threads_active_tracked.add(thread_id)
+
+    # Determine if we should increment the active gauge inside the lock
+    should_increment = True
+    if thread_id:
+        with _threads_active_lock:
+            if thread_id in _threads_active_tracked:
+                should_increment = False  # Already tracked, don't increment
+            else:
+                _threads_active_tracked.add(thread_id)
+
+    # Record metrics outside the lock
     m.threads_created_total.add(1, merged)
-    m.threads_active.add(1, merged)
+    if should_increment:
+        m.threads_active.add(1, merged)
 
 
 def record_thread_deleted(
@@ -676,3 +777,29 @@ def record_thread_messages(
     m = get_metrics()
     if m:
         m.thread_messages_count.record(message_count, _attrs(attributes))
+
+
+def record_graph_built(
+    build_start_mono: float,
+    *,
+    cache_hit: bool = False,
+    mcp_tool_count: int = 0,
+    attributes: Optional[dict[str, Any]] = None,
+) -> None:
+    """Record graph build completion with cache hit status and tool count.
+
+    Args:
+        build_start_mono: Monotonic timestamp from when graph build started
+        cache_hit: Whether the graph was retrieved from cache
+        mcp_tool_count: Number of MCP tools loaded into the graph
+        attributes: Additional attributes to attach to the metric
+    """
+    m = get_metrics()
+    if m:
+        duration = time.monotonic() - build_start_mono
+        merged = {
+            "cache_hit": str(cache_hit),
+            "mcp_tools": str(mcp_tool_count),
+            **_attrs(attributes),
+        }
+        m.graph_build_duration_seconds.record(duration, merged)

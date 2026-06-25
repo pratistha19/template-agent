@@ -114,12 +114,21 @@ def check_otel() -> dict[str, Any]:
 
         _, endpoint, _, _, _ = _resolve_config()
 
+        # Try to get OTEL SDK version
+        sdk_version = None
+        try:
+            import opentelemetry
+            sdk_version = opentelemetry.__version__
+        except Exception:
+            pass
+
         return {
             "status": "ok",
             "initialized": _initialized,
             "enabled": _otel_enabled,
             "tracing_active": is_tracing_enabled(),
             "endpoint": endpoint if _otel_enabled else None,
+            "sdk_version": sdk_version,
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc)[:200]}

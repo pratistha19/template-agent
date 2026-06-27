@@ -105,9 +105,12 @@ def check_cache() -> dict[str, Any]:
 def check_otel() -> dict[str, Any]:
     """Return OpenTelemetry initialization status."""
     try:
-        from deep_agent.aegra.otel import is_tracing_enabled
-        from deep_agent.aegra.otel import _initialized, _otel_enabled
-        from deep_agent.aegra.otel import _resolve_config
+        from deep_agent.aegra.otel import (
+            _initialized,
+            _otel_enabled,
+            _resolve_config,
+            is_tracing_enabled,
+        )
 
         if not _initialized:
             return {"status": "not_initialized"}
@@ -118,6 +121,7 @@ def check_otel() -> dict[str, Any]:
         sdk_version = None
         try:
             import opentelemetry
+
             sdk_version = opentelemetry.__version__
         except Exception:
             pass

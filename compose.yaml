@@ -8,7 +8,7 @@
 ##   make demo          - Clone repos, configure, start full stack
 ##   make clean         - Stop stack, remove data + cloned repos
 ##
-## Observability profile:  Adds Jaeger + Prometheus
+## Observability profile:  Adds Jaeger for trace visualization
 ##   docker compose --profile observability up
 ##   Set ENABLE_OTEL=true in .env to enable metrics/tracing export
 ##
@@ -23,7 +23,6 @@
 ##
 ## Services (observability profile):
 ##   jaeger                - Jaeger UI for trace visualization (UI :16686)
-##   prometheus            - Prometheus metrics storage (UI :9090)
 
 services:
   pgvector:
@@ -184,30 +183,10 @@ services:
     networks:
       - demo-network
 
-  prometheus:
-    profiles: [observability]
-    image: prom/prometheus:v2.50.1
-    container_name: demo-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./scripts/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
-      - demo_prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    restart: unless-stopped
-    networks:
-      - demo-network
-
 volumes:
   demo_pgvector_data:
     driver: local
   demo_redis_data:
-    driver: local
-  demo_prometheus_data:
     driver: local
 
 networks:

@@ -21,22 +21,19 @@ Local dev:   Agent --OTLP/gRPC--> Jaeger (:4317)
 OpenShift:   Agent --OTLP/gRPC--> otel-gateway / managed observability service
 ```
 
-Prometheus in the local compose profile is for **self-monitoring only** — agent metrics are exported via OTLP, not scraped from a Prometheus endpoint on the agent.
+Agent metrics export via OTLP, not Prometheus scrape.
 
 ## Local Development
 
 ### Quick Start
 
-Start Jaeger (and optional Prometheus UI):
+Start Jaeger:
 
 ```bash
 docker compose --profile observability up
 ```
 
-This launches:
-
-- **Jaeger** — trace UI at http://localhost:16686 (OTLP gRPC on `:4317`)
-- **Prometheus** — self-monitoring UI at http://localhost:9090
+This launches **Jaeger** — trace UI at http://localhost:16686 (OTLP gRPC on `:4317`).
 
 ### Enable OTEL in Agent
 

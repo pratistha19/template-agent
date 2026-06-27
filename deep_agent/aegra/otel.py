@@ -132,7 +132,7 @@ class MetricsContainer:
             prefix: Metric name prefix (defaults to service name from config)
         """
         if prefix is None:
-            prefix = _resolve_service_name().replace("-", "_")
+            prefix = _normalize_metric_prefix(_resolve_service_name())
         self._prefix = prefix
 
         self.conversations_total = meter.create_counter(
@@ -222,6 +222,16 @@ class MetricsContainer:
         self.graph_build_duration_seconds.record(0)
 
 
+def _normalize_metric_prefix(service_name: str) -> str:
+    """Convert a service display name to a valid OTEL metric name prefix."""
+    prefix = service_name.strip().lower()
+    for char in (" ", "-"):
+        prefix = prefix.replace(char, "_")
+    while "__" in prefix:
+        prefix = prefix.replace("__", "_")
+    return prefix.strip("_") or "template_agent"
+
+
 def _resolve_service_name() -> str:
     """Resolve service name from agent config with unique fallback.
 
@@ -269,40 +279,38 @@ def _resolve_service_version() -> str:
     if version:
         return version
 
-    # Use cached value if available
-    if _resolved_version is not None:
-        return _resolved_version
+    if _resolved_version is None:
+        with _version_lock:
+            if _resolved_version is None:
+                # Try package metadata
+                try:
+                    from importlib.metadata import version as pkg_version
 
-    with _version_lock:
-        # Double-check after acquiring lock
-        if _resolved_version is not None:
-            return _resolved_version
+                    _resolved_version = pkg_version("deep-agent")
+                except Exception:
+                    pass
 
-        # Try package metadata
-        try:
-            from importlib.metadata import version as pkg_version
-            resolved = pkg_version("deep-agent")
-            _resolved_version = resolved
-            return resolved
-        except Exception:
-            pass
+                if _resolved_version is None:
+                    # Try reading from pyproject.toml (development)
+                    try:
+                        pyproject_path = (
+                            Path(__file__).parent.parent.parent / "pyproject.toml"
+                        )
+                        if pyproject_path.exists():
+                            import tomllib
 
-        # Try reading from pyproject.toml (development)
-        try:
-            pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
-            if pyproject_path.exists():
-                import tomllib
-                with open(pyproject_path, "rb") as f:
-                    data = tomllib.load(f)
-                    proj_version = data.get("project", {}).get("version")
-                    if proj_version:
-                        _resolved_version = proj_version
-                        return proj_version
-        except Exception:
-            pass
+                            with open(pyproject_path, "rb") as f:
+                                data = tomllib.load(f)
+                                proj_version = data.get("project", {}).get("version")
+                                if isinstance(proj_version, str) and proj_version:
+                                    _resolved_version = proj_version
+                    except Exception:
+                        pass
 
-        _resolved_version = _DEFAULT_SERVICE_VERSION
-        return _DEFAULT_SERVICE_VERSION
+                if _resolved_version is None:
+                    _resolved_version = _DEFAULT_SERVICE_VERSION
+
+    return _resolved_version
 
 
 def _resolve_config() -> tuple[bool, str, bool, int, bool]:
@@ -343,7 +351,11 @@ def _resolve_config() -> tuple[bool, str, bool, int, bool]:
             MAX_EXPORT_INTERVAL_MS,
         )
         # Validate config default is also within range
-        if not (MIN_EXPORT_INTERVAL_MS <= cfg.metrics.export_interval_ms <= MAX_EXPORT_INTERVAL_MS):
+        if not (
+            MIN_EXPORT_INTERVAL_MS
+            <= cfg.metrics.export_interval_ms
+            <= MAX_EXPORT_INTERVAL_MS
+        ):
             logger.error(
                 "Config default export_interval_ms=%d also outside valid range, "
                 "using minimum allowed value %d",
@@ -384,7 +396,7 @@ def _create_histogram_views(prefix: Optional[str] = None) -> list[View]:
         prefix: Metric name prefix (defaults to service name from config)
     """
     if prefix is None:
-        prefix = _resolve_service_name().replace("-", "_")
+        prefix = _normalize_metric_prefix(_resolve_service_name())
     return [
         View(
             instrument_name=f"{prefix}_conversation_duration_seconds",
@@ -432,7 +444,7 @@ def initialize_telemetry() -> None:
 
     service_name = _resolve_service_name()
     resource = _build_resource()
-    metric_prefix = service_name.replace("-", "_")
+    metric_prefix = _normalize_metric_prefix(service_name)
     views = _create_histogram_views(prefix=metric_prefix)
 
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -527,7 +539,13 @@ def instrument_fastapi(app: Any) -> None:
 
 def shutdown_telemetry() -> None:
     """Flush and shut down both meter and tracer providers."""
-    global _initialized, _tracer_provider, _meter, _metrics_container, _snapshot_reader, _resolved_version
+    global \
+        _initialized, \
+        _tracer_provider, \
+        _meter, \
+        _metrics_container, \
+        _snapshot_reader, \
+        _resolved_version
 
     if _tracer_provider is not None and hasattr(_tracer_provider, "shutdown"):
         _tracer_provider.shutdown()
@@ -589,6 +607,9 @@ def get_metrics_snapshot() -> dict[str, Any]:
         return {}
 
     data = _snapshot_reader.get_metrics_data()
+    if data is None:
+        return {}
+
     result: dict[str, Any] = {}
 
     for resource_metrics in data.resource_metrics:

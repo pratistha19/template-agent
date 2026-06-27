@@ -16,6 +16,7 @@ Classes:
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import yaml
 
 from deep_agent.src.exceptions import AppException, ErrorCodes
 from deep_agent.src.settings import settings
+from deep_agent.src.token_budget.config import TokenBudgetConfig
 from deep_agent.utils.pylogger import get_python_logger
 
 from .cache import CacheFileConfig
@@ -41,9 +43,12 @@ logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
 
 # Config directory path - read from CONFIG_PATH env var for base image pattern
 # Falls back to repo-root config/agent/ for backward compatibility
-import os
-_AGENT_CONFIG_DIR = Path(os.getenv("CONFIG_PATH",
-    str(Path(__file__).parent.parent.parent.parent.parent / "config" / "agent")))
+_AGENT_CONFIG_DIR = Path(
+    os.getenv(
+        "CONFIG_PATH",
+        str(Path(__file__).parent.parent.parent.parent.parent / "config" / "agent"),
+    )
+)
 
 
 class AgentConfig:
@@ -67,6 +72,7 @@ class AgentConfig:
     _providers_config: ProvidersFileConfig
     _cache_config: CacheFileConfig
     _otel_config: OtelFileConfig
+    _token_budget_config: TokenBudgetConfig
     _name: str
 
     def __new__(cls, base_dir: Path | None = None) -> "AgentConfig":
@@ -129,7 +135,7 @@ class AgentConfig:
 
         try:
             raw = yaml.safe_load(otel_yaml.read_text()) or {}
-            config = OtelFileConfig.model_validate(raw.get("otel", {}))
+            config: OtelFileConfig = OtelFileConfig.model_validate(raw.get("otel", {}))
             logger.info("Loaded OTEL config from observability.yaml")
             return config
         except Exception as e:
@@ -146,7 +152,7 @@ class AgentConfig:
             if self._configs_loaded:
                 logger.debug("CONFIG_AUTO_RELOAD=true: reloading configs from disk")
             self._configs_loaded = False
-        
+
         if self._configs_loaded:
             return
 
@@ -183,6 +189,11 @@ class AgentConfig:
         # Load OTEL config from observability.yaml
         self._otel_config = self._load_otel_config()
 
+        # Extract token budget section
+        self._token_budget_config = TokenBudgetConfig.model_validate(
+            raw.get("token_budget", {})
+        )
+
         # Extract top-level identity
         self._name = raw.get("name", "Agent")
         # Scan skills first, as orchestrator and subagents need them for resolution
@@ -213,9 +224,7 @@ class AgentConfig:
         Raises:
             AppException: If ``mcps`` is not a list of strings.
         """
-        if not isinstance(mcps, list) or not all(
-            isinstance(s, str) for s in mcps
-        ):
+        if not isinstance(mcps, list) or not all(isinstance(s, str) for s in mcps):
             raise AppException(
                 f"Agent '{agent_name}': 'mcps' must be a list of strings",
                 ErrorCodes.CONFIGURATION_VALIDATION_ERROR,
@@ -299,6 +308,70 @@ class AgentConfig:
 
         return subagents
 
+    @staticmethod
+    def _validate_mcp_server(name: str, cfg: dict[str, Any]) -> None:
+        """Log clear errors for invalid per-MCP OAuth/DCR configuration."""
+        auth_mode = cfg.get("auth_mode", "sso")
+        cfg["auth_mode"] = auth_mode
+
+        if auth_mode not in ("sso", "oauth", "dcr"):
+            logger.error(
+                "MCP server '%s': invalid auth_mode '%s' (expected sso, oauth, or dcr)",
+                name,
+                auth_mode,
+            )
+            return
+
+        if auth_mode not in ("oauth", "dcr"):
+            return
+
+        oauth = cfg.get("oauth")
+        if not isinstance(oauth, dict):
+            logger.error(
+                "MCP server '%s': auth_mode '%s' requires an 'oauth' block",
+                name,
+                auth_mode,
+            )
+            return
+
+        for field in (
+            "authorization_endpoint",
+            "token_endpoint",
+        ):
+            if not oauth.get(field):
+                logger.error(
+                    "MCP server '%s': oauth.%s is required for auth_mode '%s'",
+                    name,
+                    field,
+                    auth_mode,
+                )
+
+        if oauth.get("redirect_uri"):
+            logger.warning(
+                "MCP server '%s': oauth.redirect_uri in mcp.json is ignored — "
+                "redirect URI is derived from AGENT_PUBLIC_BASE_URL",
+                name,
+            )
+
+        if auth_mode == "oauth" and not oauth.get("client_id"):
+            logger.error(
+                "MCP server '%s': oauth.client_id is required for auth_mode 'oauth'",
+                name,
+            )
+
+        if oauth.get("client_secret"):
+            logger.warning(
+                "MCP server '%s': oauth.client_secret in mcp.json is insecure — "
+                "use oauth.client_secret_env with an environment variable name instead",
+                name,
+            )
+
+        if auth_mode == "dcr" and not oauth.get("registration_endpoint"):
+            logger.error(
+                "MCP server '%s': oauth.registration_endpoint is required for auth_mode 'dcr'",
+                name,
+            )
+
     def _load_mcp_servers(self) -> dict[str, Any]:
         """Load MCP server configuration at initialization.
 
@@ -313,6 +386,9 @@ class AgentConfig:
         try:
             data = json.loads(mcp_path.read_bytes())
             servers: dict[str, Any] = data.get("mcpServers", {})
+            for name, cfg in servers.items():
+                if isinstance(cfg, dict):
+                    self._validate_mcp_server(name, cfg)
             logger.info(f"Loaded {len(servers)} MCP server config(s)")
             return servers
         except Exception as e:
@@ -412,6 +488,11 @@ class AgentConfig:
         """
         self._ensure_loaded()
         return self._cache_config
+
+    def get_token_budget_config(self) -> TokenBudgetConfig:
+        """Get the pre-loaded per-thread token budget configuration."""
+        self._ensure_loaded()
+        return self._token_budget_config
 
     def get_name(self) -> str:
         """Get the agent display name from config.

@@ -5,7 +5,7 @@ functions, structured logging, defensive error handling.
 
 Two independent paths trigger shutdown:
 
-1. ``atexit`` callback (registered at import time from ``feedback.py``)
+1. ``atexit`` callback (registered at import time from ``http_app.py``)
    — fires reliably when uvicorn handles SIGTERM and exits normally.
    Runs a synchronous cleanup (Langfuse flush, Redis close, graph
    cache clear). No event loop needed.
@@ -17,7 +17,7 @@ Two independent paths trigger shutdown:
 
 Aegra strips our custom app's lifespan and middleware, so neither
 ASGI lifespan nor middleware-based registration works. The atexit
-path is guaranteed because Aegra always imports ``feedback.py``.
+path is guaranteed because Aegra always imports ``http_app.py``.
 
 Both paths call idempotent cleanup — the second call is a no-op.
 
@@ -86,7 +86,7 @@ def is_shutting_down() -> bool:
 def register_atexit() -> None:
     """Register the sync shutdown as an atexit callback.
 
-    Called at import time from ``feedback.py``. Unlike signal handlers,
+    Called at import time from ``http_app.py``. Unlike signal handlers,
     atexit callbacks are not overwritten by uvicorn. Idempotent — safe
     to call multiple times (tests, reloads).
     """
@@ -207,10 +207,10 @@ async def run_shutdown() -> dict[str, str]:
         ("redis", _close_redis),
     ]:
         try:
-            result = step()
-            if asyncio.iscoroutine(result):
-                result = await result
-            results[key] = result
+            step_result = step()
+            if asyncio.iscoroutine(step_result):
+                step_result = await step_result
+            results[key] = str(step_result)
         except Exception as exc:
             logger.warning("Shutdown step '%s' failed: %s", key, exc)
             results[key] = f"error: {exc}"

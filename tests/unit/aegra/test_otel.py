@@ -206,7 +206,7 @@ class TestMetricsContainer:
         assert container.thread_messages_count is not None
 
         assert mock_meter.create_counter.call_count == 6
-        assert mock_meter.create_histogram.call_count == 4
+        assert mock_meter.create_histogram.call_count == 5
         assert mock_meter.create_up_down_counter.call_count == 2
 
 
@@ -309,7 +309,9 @@ class TestMetricRecording:
         # Record stream lifecycle
         start_mono = record_stream_started()
         record_first_token(start_mono, attributes={"model": "test"})
-        record_stream_completed(start_mono, token_count=100, attributes={"model": "test"})
+        record_stream_completed(
+            start_mono, token_count=100, attributes={"model": "test"}
+        )
 
         snapshot = get_metrics_snapshot()
         assert snapshot is not None

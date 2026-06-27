@@ -235,7 +235,9 @@ class TestAgentFactory:
                 return_value=None,
             ),
             patch("deep_agent.aegra.graph._ensure_startup", new_callable=AsyncMock),
-            patch("deepagents.create_deep_agent", return_value=mock_compiled) as mock_create,
+            patch(
+                "deepagents.create_deep_agent", return_value=mock_compiled
+            ) as mock_create,
         ):
             from deep_agent.aegra.graph import agent
 
@@ -244,5 +246,5 @@ class TestAgentFactory:
         assert result is mock_compiled
         assert mock_create.call_args.kwargs["tools"] == [mock_tool]
         mock_get_mcp.assert_awaited_once_with(
-            sso_token=None, server_names=["dataverse-mcp-prod1"]
+            sso_token=None, server_names=["dataverse-mcp-prod1"], user_id=None
         )

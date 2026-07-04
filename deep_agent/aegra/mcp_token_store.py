@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -21,13 +23,27 @@ logger = get_python_logger()
 _TABLES_ENSURED = False
 _TOKEN_KEY_PREFIX = "mcp_oauth_token:"
 
+
+def _agent_id() -> str:
+    """Derive a stable agent identifier from AGENT_PUBLIC_BASE_URL.
+
+    Each deployed agent has a unique base URL (e.g.
+    ``http://localhost:8080/org/agent-name``).  The path portion
+    (``org/agent-name``) is used to scope OAuth tokens and DCR client
+    registrations so agents sharing a database don't leak credentials.
+    """
+    base = os.environ.get("AGENT_PUBLIC_BASE_URL", "")
+    return urlparse(base).path.strip("/") or "default"
+
 CREATE_OAUTH_CLIENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
-    mcp_name           TEXT PRIMARY KEY,
+    agent_id           TEXT NOT NULL DEFAULT '',
+    mcp_name           TEXT NOT NULL,
     client_id          TEXT NOT NULL,
     client_secret      TEXT,
     registration_data  JSONB,
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_id, mcp_name)
 );
 """
 
@@ -37,27 +53,15 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name = 'mcp_oauth_clients'
-    ) AND (
-        NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'mcp_oauth_clients'
-              AND column_name = 'client_id'
-        )
-        OR NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'mcp_oauth_clients'
-              AND column_name = 'registration_data'
-        )
-        OR NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'mcp_oauth_clients'
-              AND column_name = 'updated_at'
-        )
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'mcp_oauth_clients'
+          AND column_name = 'agent_id'
     ) THEN
-        DROP TABLE mcp_oauth_clients;
+        ALTER TABLE mcp_oauth_clients ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE mcp_oauth_clients DROP CONSTRAINT IF EXISTS mcp_oauth_clients_pkey;
+        ALTER TABLE mcp_oauth_clients ADD PRIMARY KEY (agent_id, mcp_name);
     END IF;
 END $$;
 """
@@ -96,7 +100,8 @@ class McpTokenStore:
 
     @staticmethod
     def _token_key(user_id: str, mcp_name: str) -> str:
-        return f"{_TOKEN_KEY_PREFIX}{user_id}:{mcp_name}"
+        aid = _agent_id()
+        return f"{_TOKEN_KEY_PREFIX}{aid}:{user_id}:{mcp_name}"
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str | None:
@@ -156,14 +161,15 @@ class McpTokenStore:
             logger.info("MCP OAuth client table ensured")
 
     async def get_client(self, mcp_name: str) -> McpOAuthClient | None:
-        """Return the registered OAuth client for *mcp_name*, if any."""
+        """Return the registered OAuth client for *mcp_name* scoped to this agent."""
         await self.ensure_tables()
+        aid = _agent_id()
         async with await psycopg.AsyncConnection.connect(
             self._uri, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
-                "SELECT * FROM mcp_oauth_clients WHERE mcp_name = %s",
-                (mcp_name,),
+                "SELECT * FROM mcp_oauth_clients WHERE agent_id = %s AND mcp_name = %s",
+                (aid, mcp_name),
             )
             row = await cur.fetchone()
             if row is None:
@@ -183,23 +189,26 @@ class McpTokenStore:
         client_secret: str | None = None,
         registration_data: dict[str, Any] | None = None,
     ) -> McpOAuthClient:
-        """Insert or update the OAuth client record for *mcp_name*."""
+        """Insert or update the OAuth client record scoped to this agent."""
         await self.ensure_tables()
+        aid = _agent_id()
         enc_secret = encrypt_secret(client_secret)
         async with await psycopg.AsyncConnection.connect(self._uri) as conn:
             await conn.execute(
                 """
                 INSERT INTO mcp_oauth_clients (
-                    mcp_name, client_id, client_secret, registration_data, updated_at
+                    agent_id, mcp_name, client_id, client_secret,
+                    registration_data, updated_at
                 )
-                VALUES (%s, %s, %s, %s, now())
-                ON CONFLICT (mcp_name) DO UPDATE SET
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (agent_id, mcp_name) DO UPDATE SET
                     client_id = EXCLUDED.client_id,
                     client_secret = EXCLUDED.client_secret,
                     registration_data = EXCLUDED.registration_data,
                     updated_at = now()
                 """,
                 (
+                    aid,
                     mcp_name,
                     client_id,
                     enc_secret,

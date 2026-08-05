@@ -535,4 +535,6 @@ class TestGetMCPTools:
             mock_tool.name = "mcp__jira_mcp_prod"
             mock_placeholder.return_value = mock_tool
             await get_mcp_tools()
-            mock_placeholder.assert_called_once_with("jira-mcp-prod")
+            mock_placeholder.assert_called_once_with(
+                "jira-mcp-prod", mock_servers["jira-mcp-prod"]
+            )

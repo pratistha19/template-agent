@@ -334,7 +334,9 @@ def _build_server_config(
     return config
 
 
-def _create_auth_placeholder_tool(mcp_name: str) -> Any:
+def _create_auth_placeholder_tool(
+    mcp_name: str, server_cfg: dict[str, Any] | None = None
+) -> Any:
     """Create a stub tool that triggers NeedsAuthorization when called.
 
     When an MCP server requires OAuth/DCR but the user hasn't authenticated yet,
@@ -350,6 +352,7 @@ def _create_auth_placeholder_tool(mcp_name: str) -> Any:
         query: str = PydanticField(default="", description="Your request for this tool")
 
     safe = mcp_name.replace("-", "_")
+    svc_desc = (server_cfg or {}).get("description", f"{mcp_name} services")
 
     async def _require_auth(query: str = "") -> str:
         from deep_agent.aegra.mcp_auth import (
@@ -360,9 +363,9 @@ def _create_auth_placeholder_tool(mcp_name: str) -> Any:
         user_id = _current_user_id.get()
         if user_id:
             resolver = get_mcp_credential_resolver()
-            server_cfg = _get_server_configs().get(mcp_name, {})
+            cfg = _get_server_configs().get(mcp_name, {})
             try:
-                if await resolver.has_valid_token(user_id, mcp_name, server_cfg):
+                if await resolver.has_valid_token(user_id, mcp_name, cfg):
                     return (
                         f"Successfully connected to {mcp_name}. "
                         f"The tools are now available — please ask the user to "
@@ -379,8 +382,9 @@ def _create_auth_placeholder_tool(mcp_name: str) -> Any:
     return StructuredTool(
         name=f"mcp__{safe}",
         description=(
-            f"Use {mcp_name} tools. "
-            f"Authentication is required — calling this will prompt the user to connect."
+            f"Call this tool to access {svc_desc}. "
+            f"You MUST call this tool when the user asks about any of these services. "
+            f"It will handle authentication automatically."
         ),
         func=lambda query="": "",
         coroutine=_require_auth,
@@ -442,7 +446,7 @@ async def _connect_single_server(
                     "[%s] MCP OAuth required — returning auth placeholder tool",
                     name,
                 )
-                return [_create_auth_placeholder_tool(name)]
+                return [_create_auth_placeholder_tool(name, server_cfg)]
             elif _is_auth_error(exc):
                 auth_mode = server_cfg.get("auth_mode", "sso")
                 if auth_mode in ("oauth", "dcr"):
@@ -450,7 +454,7 @@ async def _connect_single_server(
                         "[%s] MCP tool discovery auth failed — returning auth placeholder tool",
                         name,
                     )
-                    return [_create_auth_placeholder_tool(name)]
+                    return [_create_auth_placeholder_tool(name, server_cfg)]
                 else:
                     logger.warning(
                         f"[{name}] MCP auth failed — {type(exc).__name__}: {exc}"
@@ -623,7 +627,7 @@ async def get_mcp_tools(
                     mcp_prefix_name,
                     auth_mode,
                 )
-                placeholder_tools.append([_create_auth_placeholder_tool(name)])
+                placeholder_tools.append([_create_auth_placeholder_tool(name, entry)])
                 continue
             connect_jobs.append(
                 _connect_single_server(

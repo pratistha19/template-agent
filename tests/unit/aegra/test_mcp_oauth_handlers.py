@@ -955,6 +955,77 @@ class TestHandleMcpReregister:
         mock_register.assert_awaited_once()
 
 
+class TestMcpReregisterRoute:
+    def test_returns_403_when_api_disabled(self):
+        with (
+            patch(
+                "deep_agent.src.settings.settings"
+            ) as mock_settings,
+        ):
+            mock_settings.ENABLE_DCR_REREGISTER_API = False
+            client = TestClient(app)
+            resp = client.post("/mcp/dcr-mcp/reregister")
+
+        assert resp.status_code == 403
+        assert "disabled" in resp.json()["detail"]
+
+    def test_returns_403_when_dcr_disabled_for_dcr_mcp(self):
+        with (
+            patch(
+                "deep_agent.src.settings.settings"
+            ) as mock_settings,
+            patch(
+                "deep_agent.aegra.mcp_routes.agent_config.get_mcp_servers",
+                return_value={
+                    "dcr-mcp": {"enabled": True, "auth_mode": "dcr", "oauth": {}},
+                },
+            ),
+        ):
+            mock_settings.ENABLE_DCR_REREGISTER_API = True
+            mock_settings.MCP_DCR_ENABLED = False
+            client = TestClient(app)
+            resp = client.post("/mcp/dcr-mcp/reregister")
+
+        assert resp.status_code == 403
+        assert "DCR is disabled" in resp.json()["detail"]
+
+    def test_returns_success_when_enabled(self):
+        with (
+            patch(
+                "deep_agent.src.settings.settings"
+            ) as mock_settings,
+            patch(
+                "deep_agent.aegra.mcp_routes.agent_config.get_mcp_servers",
+                return_value={
+                    "dcr-mcp": {"enabled": True, "auth_mode": "dcr", "oauth": {}},
+                },
+            ),
+            patch(
+                "deep_agent.aegra.mcp_routes._authenticated_user_id",
+                new_callable=AsyncMock,
+                return_value="user-1",
+            ),
+            patch(
+                "deep_agent.aegra.mcp_oauth_handlers.handle_mcp_reregister",
+                new_callable=AsyncMock,
+                return_value={
+                    "mcp_name": "dcr-mcp",
+                    "re_registered": True,
+                    "client_id": "new-cid",
+                },
+            ),
+        ):
+            mock_settings.ENABLE_DCR_REREGISTER_API = True
+            mock_settings.MCP_DCR_ENABLED = True
+            client = TestClient(app)
+            resp = client.post("/mcp/dcr-mcp/reregister")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["re_registered"] is True
+        assert body["client_id"] == "new-cid"
+
+
 class TestCallbackHtml:
     def test_includes_opener_origin_in_postmessage(self):
         html = _callback_html(

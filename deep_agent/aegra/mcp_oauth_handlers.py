@@ -384,31 +384,12 @@ def _require_interactive_oauth(mcp_name: str, server_cfg: dict[str, Any]) -> Non
         )
 
 
-async def handle_mcp_deregister(mcp_name: str) -> dict[str, Any]:
+async def handle_mcp_reregister(mcp_name: str) -> dict[str, Any]:
     """Delete existing DCR client credentials and re-register with current config URLs.
 
     Call this when any DCR-related URL changes (authorization_endpoint,
     token_endpoint, registration_endpoint, server url, or redirect_uri)
     so that stale client_id/client_secret are replaced.
-
-    # To call this method, add the following route in mcp_routes.py:
-    #
-    # @router.post("/mcp/{mcp_name}/deregister")
-    # async def mcp_deregister(mcp_name: str, request: Request) -> JSONResponse:
-    #     from deep_agent.aegra.mcp_oauth_handlers import handle_mcp_deregister
-    #     from deep_agent.src.settings import settings
-    #
-    #     servers = agent_config.get_mcp_servers()
-    #     cfg = servers.get(mcp_name, {})
-    #     if cfg.get("auth_mode") == "dcr" and not settings.MCP_DCR_ENABLED:
-    #         return JSONResponse(
-    #             status_code=403,
-    #             content={"detail": "DCR is disabled"},
-    #         )
-    #
-    #     await _authenticated_user_id(request)
-    #     result = await handle_mcp_deregister(mcp_name)
-    #     return JSONResponse(content=result)
     """
     server_cfg = _get_mcp_server_config(mcp_name)
     auth_mode = server_cfg.get("auth_mode", "sso")
@@ -424,7 +405,7 @@ async def handle_mcp_deregister(mcp_name: str) -> dict[str, Any]:
 
     deleted = await store.delete_client(current_agent_name, mcp_name)
     logger.info(
-        "DCR deregister for '%s' (agent '%s'): client deleted=%s",
+        "DCR re-register for '%s' (agent '%s'): old client deleted=%s",
         mcp_name,
         current_agent_name,
         deleted,

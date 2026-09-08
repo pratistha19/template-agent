@@ -16,7 +16,7 @@ from deep_agent.aegra.mcp_oauth_handlers import (
     _register_dcr_client,
     handle_mcp_connect,
     handle_mcp_connections,
-    handle_mcp_deregister,
+    handle_mcp_reregister,
     handle_mcp_disconnect,
     handle_mcp_oauth_callback,
 )
@@ -844,7 +844,7 @@ class TestHandleMcpDisconnect:
 
 
 @pytest.mark.asyncio
-class TestHandleMcpDeregister:
+class TestHandleMcpReregister:
     async def test_rejects_non_dcr_auth_mode(self):
         server_cfg = {
             "enabled": True,
@@ -856,7 +856,7 @@ class TestHandleMcpDeregister:
             return_value=server_cfg,
         ):
             with pytest.raises(HTTPException) as exc:
-                await handle_mcp_deregister("oauth-mcp")
+                await handle_mcp_reregister("oauth-mcp")
             assert exc.value.status_code == 400
             assert "not using DCR" in exc.value.detail
 
@@ -867,7 +867,7 @@ class TestHandleMcpDeregister:
             return_value=server_cfg,
         ):
             with pytest.raises(HTTPException) as exc:
-                await handle_mcp_deregister("sso-mcp")
+                await handle_mcp_reregister("sso-mcp")
             assert exc.value.status_code == 400
             assert "not using DCR" in exc.value.detail
 
@@ -905,7 +905,7 @@ class TestHandleMcpDeregister:
             mock_settings.agent_deployment_id = "test-agent"
             mock_settings.database_uri = "postgresql://test"
 
-            result = await handle_mcp_deregister("dcr-mcp")
+            result = await handle_mcp_reregister("dcr-mcp")
 
         assert result["mcp_name"] == "dcr-mcp"
         assert result["re_registered"] is True
@@ -947,7 +947,7 @@ class TestHandleMcpDeregister:
             mock_settings.agent_deployment_id = "test-agent"
             mock_settings.database_uri = "postgresql://test"
 
-            result = await handle_mcp_deregister("dcr-mcp")
+            result = await handle_mcp_reregister("dcr-mcp")
 
         assert result["re_registered"] is True
         assert result["client_id"] == "fresh-cid"

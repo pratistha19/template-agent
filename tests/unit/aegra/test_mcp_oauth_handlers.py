@@ -881,8 +881,11 @@ class TestHandleMcpDeregister:
                 "token_endpoint": "https://auth.example.com/token",
             },
         }
+        call_order = MagicMock()
+        call_order.delete_client = AsyncMock(return_value=True)
+        call_order.register = AsyncMock(return_value=("new-client-id", "new-secret"))
         mock_store = MagicMock()
-        mock_store.delete_client = AsyncMock(return_value=True)
+        mock_store.delete_client = call_order.delete_client
 
         with (
             patch(
@@ -896,9 +899,8 @@ class TestHandleMcpDeregister:
             ),
             patch(
                 "deep_agent.aegra.mcp_oauth_handlers._register_dcr_client",
-                new_callable=AsyncMock,
-                return_value=("new-client-id", "new-secret"),
-            ) as mock_register,
+                side_effect=call_order.register,
+            ),
         ):
             mock_settings.agent_deployment_id = "test-agent"
             mock_settings.database_uri = "postgresql://test"
@@ -908,10 +910,12 @@ class TestHandleMcpDeregister:
         assert result["mcp_name"] == "dcr-mcp"
         assert result["re_registered"] is True
         assert result["client_id"] == "new-client-id"
-        mock_store.delete_client.assert_awaited_once_with("test-agent", "dcr-mcp")
-        mock_register.assert_awaited_once_with(
+        call_order.delete_client.assert_awaited_once_with("test-agent", "dcr-mcp")
+        call_order.register.assert_awaited_once_with(
             "test-agent", "dcr-mcp", server_cfg["oauth"], server_cfg
         )
+        call_names = [c[0] for c in call_order.method_calls]
+        assert call_names.index("delete_client") < call_names.index("register")
 
     async def test_reregisters_even_when_no_prior_client(self):
         server_cfg = {

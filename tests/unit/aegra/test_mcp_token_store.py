@@ -229,6 +229,7 @@ class TestMcpTokenStoreRedis:
         sql = mock_conn.execute.call_args[0][0]
         assert "DELETE" in sql
         assert mock_conn.execute.call_args[0][1] == ("default", "dcr-mcp")
+        mock_conn.commit.assert_awaited_once()
 
     async def test_delete_client_returns_false_when_no_row(self, store):
         mock_cur = AsyncMock()

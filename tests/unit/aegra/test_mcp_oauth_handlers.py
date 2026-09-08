@@ -958,9 +958,7 @@ class TestHandleMcpReregister:
 class TestMcpReregisterRoute:
     def test_returns_403_when_api_disabled(self):
         with (
-            patch(
-                "deep_agent.src.settings.settings"
-            ) as mock_settings,
+            patch("deep_agent.src.settings.settings") as mock_settings,
         ):
             mock_settings.ENABLE_DCR_REREGISTER_API = False
             client = TestClient(app)
@@ -971,9 +969,7 @@ class TestMcpReregisterRoute:
 
     def test_returns_403_when_dcr_disabled_for_dcr_mcp(self):
         with (
-            patch(
-                "deep_agent.src.settings.settings"
-            ) as mock_settings,
+            patch("deep_agent.src.settings.settings") as mock_settings,
             patch(
                 "deep_agent.aegra.mcp_routes.agent_config.get_mcp_servers",
                 return_value={
@@ -991,9 +987,7 @@ class TestMcpReregisterRoute:
 
     def test_returns_success_when_enabled(self):
         with (
-            patch(
-                "deep_agent.src.settings.settings"
-            ) as mock_settings,
+            patch("deep_agent.src.settings.settings") as mock_settings,
             patch(
                 "deep_agent.aegra.mcp_routes.agent_config.get_mcp_servers",
                 return_value={

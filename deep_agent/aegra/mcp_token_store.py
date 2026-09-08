@@ -155,7 +155,7 @@ class McpTokenStore:
                 scopes=list(payload["scopes"]) if payload.get("scopes") else None,
                 updated_at=self._deserialize_datetime(payload.get("updated_at")),
             )
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             logger.warning(
                 "MCP OAuth token decryption failed (key rotation?) for "
                 "agent '%s' user '%s' MCP '%s'; treating as expired",
@@ -191,7 +191,7 @@ class McpTokenStore:
                 return None
             try:
                 decrypted_secret = decrypt_secret(row["client_secret"])
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 logger.warning(
                     "MCP OAuth client secret decryption failed (key rotation?) for "
                     "agent '%s' MCP '%s'; treating as unregistered",
@@ -253,10 +253,14 @@ class McpTokenStore:
         self, agent_name: str, user_id: str, mcp_name: str
     ) -> McpOAuthToken | None:
         """Return stored OAuth tokens for *(agent_name, user_id, mcp_name)* from Redis."""
-        raw = await asyncio.to_thread(
-            cache_get, self._token_key(agent_name, user_id, mcp_name)
-        )
+        key = self._token_key(agent_name, user_id, mcp_name)
+        raw = await asyncio.to_thread(cache_get, key)
         if raw is None:
+            logger.info(
+                "No MCP OAuth token in Redis for agent='%s' mcp='%s'",
+                agent_name,
+                mcp_name,
+            )
             return None
         try:
             payload = json.loads(raw)
@@ -295,9 +299,23 @@ class McpTokenStore:
         key = self._token_key(agent_name, user_id, mcp_name)
         stored = await asyncio.to_thread(cache_set_persistent, key, json.dumps(payload))
         if not stored:
+            logger.error(
+                "Redis SET failed for MCP OAuth token: agent='%s' mcp='%s'",
+                agent_name,
+                mcp_name,
+            )
             raise RuntimeError(
                 f"Failed to persist MCP OAuth token for agent '{agent_name}' user '{user_id}' MCP '{mcp_name}'"
             )
+        logger.info(
+            "MCP OAuth token stored: agent='%s' mcp='%s' "
+            "has_refresh=%s expires_at=%s scopes=%s",
+            agent_name,
+            mcp_name,
+            bool(refresh_token),
+            expires_at,
+            scopes,
+        )
         return McpOAuthToken(
             agent_name=agent_name,
             user_id=user_id,
@@ -309,11 +327,28 @@ class McpTokenStore:
             updated_at=self._deserialize_datetime(payload["updated_at"]),
         )
 
+    async def delete_client(self, agent_name: str, mcp_name: str) -> bool:
+        """Delete the DCR client record for *(agent_name, mcp_name)* from Postgres."""
+        await self.ensure_tables()
+        async with await psycopg.AsyncConnection.connect(self._uri) as conn:
+            cur = await conn.execute(
+                "DELETE FROM mcp_oauth_clients WHERE agent_name = %s AND mcp_name = %s",
+                (agent_name, mcp_name),
+            )
+            await conn.commit()
+            return (cur.rowcount or 0) > 0
+
     async def delete_token(self, agent_name: str, user_id: str, mcp_name: str) -> bool:
         """Delete stored OAuth tokens for *(agent_name, user_id, mcp_name)* from Redis."""
-        return await asyncio.to_thread(
-            cache_delete, self._token_key(agent_name, user_id, mcp_name)
+        key = self._token_key(agent_name, user_id, mcp_name)
+        result = await asyncio.to_thread(cache_delete, key)
+        logger.info(
+            "MCP OAuth token deleted: agent='%s' mcp='%s' success=%s",
+            agent_name,
+            mcp_name,
+            result,
         )
+        return result
 
     @staticmethod
     def expires_at_from_token_response(data: dict[str, Any]) -> datetime | None:

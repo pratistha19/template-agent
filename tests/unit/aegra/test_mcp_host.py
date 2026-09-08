@@ -1019,6 +1019,64 @@ class TestRouteWiring:
         mock_status.assert_awaited_once_with("user-1", "charts")
 
     @pytest.mark.asyncio
+    async def test_mcp_connections_route(self):
+        from deep_agent.aegra import mcp_routes
+
+        request = MagicMock()
+        request.headers = {}
+        payload = {
+            "connections": [
+                {
+                    "mcp_name": "charts",
+                    "auth_mode": "oauth",
+                    "description": "Charts",
+                    "connected": True,
+                }
+            ]
+        }
+
+        with (
+            patch(
+                "deep_agent.aegra.mcp_routes._authenticated_user_id",
+                new_callable=AsyncMock,
+                return_value="user-1",
+            ),
+            patch(
+                "deep_agent.aegra.mcp_oauth_handlers.handle_mcp_connections",
+                new_callable=AsyncMock,
+                return_value=payload,
+            ) as mock_connections,
+        ):
+            response = await mcp_routes.mcp_connections(request)
+
+        assert response.status_code == 200
+        mock_connections.assert_awaited_once_with("user-1")
+
+    @pytest.mark.asyncio
+    async def test_mcp_disconnect_route(self):
+        from deep_agent.aegra import mcp_routes
+
+        request = MagicMock()
+        request.headers = {}
+
+        with (
+            patch(
+                "deep_agent.aegra.mcp_routes._authenticated_user_id",
+                new_callable=AsyncMock,
+                return_value="user-1",
+            ),
+            patch(
+                "deep_agent.aegra.mcp_oauth_handlers.handle_mcp_disconnect",
+                new_callable=AsyncMock,
+                return_value={"mcp_name": "charts", "connected": False},
+            ) as mock_disconnect,
+        ):
+            response = await mcp_routes.mcp_disconnect("charts", request)
+
+        assert response.status_code == 200
+        mock_disconnect.assert_awaited_once_with("user-1", "charts")
+
+    @pytest.mark.asyncio
     async def test_mcp_oauth_callback_route(self):
         from deep_agent.aegra import mcp_routes
         from fastapi.responses import HTMLResponse
@@ -1042,7 +1100,7 @@ class TestRouteWiring:
 
         with (
             patch(
-                "deep_agent.aegra.mcp_routes.agent_config.get_mcp_servers",
+                "deep_agent.aegra.mcp_oauth_handlers.agent_config.get_mcp_servers",
                 return_value={
                     "charts": {"enabled": True, "auth_mode": "oauth"},
                     "off": {"enabled": False, "auth_mode": "oauth"},
@@ -1050,11 +1108,13 @@ class TestRouteWiring:
                     "dcr": {"enabled": True, "auth_mode": "dcr"},
                 },
             ),
+            patch("deep_agent.aegra.mcp_oauth_handlers.settings") as mock_settings,
             patch(
                 "deep_agent.aegra.mcp_routes.agent_config.get_name",
                 return_value="demo-agent",
             ),
         ):
+            mock_settings.MCP_DCR_ENABLED = True
             info = await mcp_routes.get_agent_info()
 
         assert info["name"] == "demo-agent"
@@ -1238,6 +1298,120 @@ class TestResolveBearer:
                 sso_token=None,
             )
         assert exc.value.status_code == 500
+
+    @pytest.mark.asyncio
+    async def test_oauth_dcr_missing_bearer_raises_401(self):
+        with (
+            patch(
+                "deep_agent.aegra.mcp_host._resolve_connection_token",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.aegra.mcp_auth.get_mcp_credential_resolver",
+            ) as mock_resolver,
+            pytest.raises(HTTPException) as exc,
+        ):
+            mock_resolver.return_value.connect_url.return_value = "/mcp/dcr-mcp/connect"
+            await _resolve_bearer(
+                "dcr-mcp",
+                _server_cfg(auth=True, auth_mode="dcr"),
+                user_id="u1",
+                sso_token=None,
+            )
+        assert exc.value.status_code == 401
+        assert exc.value.detail["error"] == "authorization_required"
+        assert exc.value.detail["connect_url"] == "/mcp/dcr-mcp/connect"
+
+
+class TestMcpSession:
+    @pytest.mark.asyncio
+    async def test_session_timeout_raises_and_logs(self, caplog):
+        """mcp_session logs an error on TimeoutError."""
+        import logging
+
+        from deep_agent.aegra.mcp_host import mcp_session
+
+        with (
+            patch(
+                "deep_agent.aegra.mcp_host._get_server_configs",
+                return_value={"slow-mcp": _server_cfg(timeout=0.01)},
+            ),
+            patch(
+                "deep_agent.aegra.mcp_host._resolve_bearer",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.aegra.mcp_host.MultiServerMCPClient",
+            ) as mock_client_cls,
+            caplog.at_level(logging.ERROR),
+        ):
+
+            @asynccontextmanager
+            async def _hanging_session(_name):
+                import asyncio
+
+                await asyncio.sleep(10)
+                yield MagicMock()  # pragma: no cover
+
+            client = MagicMock()
+            client.session = _hanging_session
+            mock_client_cls.return_value = client
+
+            with pytest.raises(TimeoutError):
+                async with mcp_session("slow-mcp", user_id="u1", sso_token=None):
+                    pass  # pragma: no cover
+
+        error_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "timed out" in r.message
+        ]
+        assert len(error_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_session_generic_error_raises_and_logs(self, caplog):
+        """mcp_session logs an error on generic Exception."""
+        import logging
+
+        from deep_agent.aegra.mcp_host import mcp_session
+
+        with (
+            patch(
+                "deep_agent.aegra.mcp_host._get_server_configs",
+                return_value={"bad-mcp": _server_cfg()},
+            ),
+            patch(
+                "deep_agent.aegra.mcp_host._resolve_bearer",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_agent.aegra.mcp_host.MultiServerMCPClient",
+            ) as mock_client_cls,
+            caplog.at_level(logging.ERROR),
+        ):
+
+            @asynccontextmanager
+            async def _failing_session(_name):
+                raise ConnectionError("transport failed")
+                yield  # pragma: no cover
+
+            client = MagicMock()
+            client.session = _failing_session
+            mock_client_cls.return_value = client
+
+            with pytest.raises(ConnectionError, match="transport failed"):
+                async with mcp_session("bad-mcp", user_id="u1", sso_token=None):
+                    pass  # pragma: no cover
+
+        error_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "session failed" in r.message
+        ]
+        assert len(error_records) == 1
 
 
 class TestListToolsAndFindTool:

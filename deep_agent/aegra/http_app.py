@@ -15,9 +15,12 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from deep_agent.aegra.eval_routes import eval_mgmt_router
+from deep_agent.aegra.eval_routes import router as eval_router
 from deep_agent.aegra.feedback import feedback_router
 from deep_agent.aegra.mcp_routes import router as mcp_router
 from deep_agent.aegra.personalization_routes import personalization_router
+from deep_agent.aegra.projects_routes import projects_router
 from deep_agent.aegra.security_middleware import (
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
@@ -186,8 +189,11 @@ app.add_middleware(
 )
 app.include_router(thread_cleanup_router)
 app.include_router(personalization_router)
+app.include_router(projects_router)
 app.include_router(mcp_router)
 app.include_router(feedback_router)
+app.include_router(eval_router)
+app.include_router(eval_mgmt_router)
 
 
 @app.get("/version")

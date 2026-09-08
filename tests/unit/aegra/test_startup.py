@@ -43,6 +43,28 @@ class TestRunStartup:
         result = await startup.run_startup()
         assert result["status"] == "already_complete"
 
+    async def test_not_ready_when_database_fails(self):
+        with (
+            patch.object(
+                startup, "_validate_config", new_callable=AsyncMock, return_value="ok"
+            ),
+            patch.object(
+                startup,
+                "_init_aegra_db",
+                new_callable=AsyncMock,
+                return_value="ok",
+            ),
+            patch.object(
+                startup,
+                "_ensure_database",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("db down"),
+            ),
+        ):
+            with pytest.raises(ConnectionError, match="db down"):
+                await startup.run_startup()
+        assert startup.is_ready() is False
+
 
 class TestValidateConfig:
     async def test_valid(self):
@@ -91,12 +113,45 @@ class TestEnsureDatabase:
                 "deep_agent.aegra.mcp_token_store.McpTokenStore",
                 return_value=mock_mcp_store,
             ),
+            patch(
+                "deep_agent.src.projects.ProjectsRepository.ensure_tables",
+                new_callable=AsyncMock,
+            ) as mock_projects_ensure,
         ):
             result = await startup._ensure_database()
         assert result == "ok"
         mock_personalization.ensure_tables.assert_awaited_once()
         mock_feedback.ensure_table.assert_awaited_once()
         mock_mcp_store.ensure_tables.assert_awaited_once()
+        mock_projects_ensure.assert_awaited_once()
+
+    async def test_db_failure_propagates(self):
+        mock_settings = MagicMock()
+        mock_settings.database_uri = "postgresql://test"
+        mock_settings.MONGODB_URI = ""
+        mock_personalization = AsyncMock()
+        mock_personalization.ensure_tables.side_effect = ConnectionError("refused")
+        with (
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch(
+                "deep_agent.src.personalization.repository.PersonalizationRepository",
+                return_value=mock_personalization,
+            ),
+            patch(
+                "deep_agent.src.feedback.repository.FeedbackRepository",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "deep_agent.aegra.mcp_token_store.McpTokenStore",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "deep_agent.src.projects.ProjectsRepository.ensure_tables",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(ConnectionError, match="refused"):
+                await startup._ensure_database()
 
     async def test_mongo_indexes_when_configured(self):
         import sys

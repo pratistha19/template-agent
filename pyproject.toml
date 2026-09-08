@@ -26,9 +26,11 @@ dependencies = [
     "langchain-mcp-adapters==0.3.2",
     "mcp>=1.28.1,<2",
     "langfuse>=4.9.0",
+    "langgraph==1.2.9",
     "langgraph-checkpoint-postgres==3.1.2",
     "langgraph-sdk>=0.1.51",
-    "aegra-cli",
+    "aegra-api==0.9.24",
+    "aegra-cli==0.9.24",
     "psycopg[binary,pool]==3.3.4",
     "psycopg2-binary==2.9.12",
     "motor==3.7.1",
@@ -50,6 +52,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.52b1,<1.0.0",
     "litellm>=1.40.0",
     "aiokafka>=0.10.0",
+    "msgpack==1.2.1",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +94,7 @@ known-first-party = ["src"]
 python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
+exclude = ["eval-runner/"]
 disallow_incomplete_defs = true
 check_untyped_defs = true
 disallow_untyped_decorators = false

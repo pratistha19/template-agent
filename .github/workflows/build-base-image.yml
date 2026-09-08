@@ -5,7 +5,7 @@ on:
     tags:
       - '*'
     branches:
-      # - main
+      - main
       - deep-agent
   pull_request:
     branches: [ main, deep-agent ]
@@ -44,7 +44,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -59,7 +59,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
+            type=sha,prefix={{branch}}-,enable=${{ !startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/pull/') }}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
@@ -230,6 +230,16 @@ jobs:
           EOF
           cat deployment/release-info.json
 
+      - name: Stamp image reference into deployment manifests
+        if: github.event_name != 'pull_request'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository }}"
+          cd deployment/overlays/openshift
+          kustomize edit set image agent=${IMAGE}:${VERSION}
+          echo "Stamped image ${IMAGE}:${VERSION} into deployment/overlays/openshift/kustomization.yaml"
+          grep -A3 'images:' kustomization.yaml
+
       - name: Create deployment package
         if: github.event_name != 'pull_request'
         run: |
@@ -317,6 +327,15 @@ jobs:
         with:
           name: ${{ steps.version.outputs.package_name }}
           path: ${{ steps.version.outputs.package_name }}
+          retention-days: 30
+
+      - name: Upload agent info artifact (for package-release workflow)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: last-good-agent
+          path: deployment/release-info.json
           retention-days: 30
 
       - name: Build summary

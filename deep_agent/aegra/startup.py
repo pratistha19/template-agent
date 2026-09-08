@@ -270,6 +270,10 @@ async def _validate_config() -> str:
         from deep_agent.src.settings import settings, validate_config
 
         validate_config(settings)
+
+        from deep_agent.aegra.middleware import validate_auth_config
+
+        validate_auth_config()
         return "ok"
     except Exception as exc:
         logger.error("Config validation failed: %s", exc)
@@ -329,9 +333,11 @@ async def _ensure_database() -> str:
             setup_tasks.append(feedback_repo.ensure_table())
 
             from deep_agent.aegra.mcp_token_store import McpTokenStore
+            from deep_agent.src.projects import ProjectsRepository
 
             mcp_token_store = McpTokenStore(settings.database_uri)
             setup_tasks.append(mcp_token_store.ensure_tables())
+            setup_tasks.append(ProjectsRepository.ensure_tables(settings.database_uri))
 
         if settings.MONGODB_URI:
             from deep_agent.src.token_budget.mongo_repository import (
@@ -351,7 +357,7 @@ async def _ensure_database() -> str:
         return "ok"
     except Exception as exc:
         logger.error("Database setup failed: %s", exc)
-        return f"error: {exc}"
+        raise
 
 
 async def _warm_caches() -> str:

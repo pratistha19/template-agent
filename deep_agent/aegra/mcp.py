@@ -45,8 +45,8 @@ _SSO_TOKEN_URL: str = ""
 _mcp_breaker: CircuitBreaker | None = None
 
 _MCP_TOOL_CACHE_TTL: float = float(agent_config.get_cache_config().mcp.ttl)
-_cached_tools: list[Any] = []
-_cached_tools_ts: float = 0.0
+_cached_tools: dict[str | None, list[Any]] = {}
+_cached_tools_ts: dict[str | None, float] = {}
 
 _current_access_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_access_token", default=None
@@ -107,6 +107,11 @@ class _TokenInjectorInterceptor:
             if auth_mode in ("oauth", "dcr"):
                 if not user_id:
                     if _mcp_tool_discovery.get():
+                        logger.info(
+                            "[%s] no user_id during %s tool discovery — proceeding unauthenticated",
+                            self._mcp_name,
+                            auth_mode,
+                        )
                         access = None
                     else:
                         raise NeedsAuthorization(
@@ -120,6 +125,12 @@ class _TokenInjectorInterceptor:
                         )
                     except NeedsAuthorization:
                         if _mcp_tool_discovery.get():
+                            logger.info(
+                                "[%s] NeedsAuthorization during %s tool discovery "
+                                "— proceeding unauthenticated (will create placeholder)",
+                                self._mcp_name,
+                                auth_mode,
+                            )
                             access = None
                         else:
                             raise
@@ -211,28 +222,36 @@ async def refresh_access_token(
 
     token_url: str = _get_token_endpoint()
     client_id: str = os.environ.get("SSO_CLIENT_ID", "")
-    client_secret: str = os.environ.get("SSO_CLIENT_SECRET", "")
+    client_secret: str = os.environ.get("SSO_CLIENT_SECRET", "")  # noqa: F841
     if not token_url or not client_id:
         logger.warning("Cannot refresh token — SSO_ISSUER_URL or SSO_CLIENT_ID not set")
         return access_token
 
     logger.info("Refreshing SSO access token (%.0fs remaining)", remaining)
     try:
-        async with httpx.AsyncClient() as client:
-            resp: httpx.Response = await client.post(
-                token_url,
-                data={
-                    "grant_type": "refresh_token",
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "refresh_token": refresh_token,
-                },
-            )
-            resp.raise_for_status()
-            new_token: str = resp.json()["access_token"]
-            new_remaining: float = _jwt_exp(new_token) - time.time()
-            logger.info("SSO token refreshed (%.0fs lifetime)", new_remaining)
-            return new_token
+        from deep_agent.aegra.auth import EVAL_TOKEN_REFRESH_ENABLED, _oidc_refresh
+
+        new_token, new_rt = await _oidc_refresh(refresh_token)
+        new_remaining: float = _jwt_exp(new_token) - time.time()
+        logger.info("SSO token refreshed (%.0fs lifetime)", new_remaining)
+
+        _current_access_token.set(new_token)
+        if new_rt != refresh_token:
+            _current_refresh_token.set(new_rt)
+            if EVAL_TOKEN_REFRESH_ENABLED:
+                sub = _current_user_id.get()
+                if sub:
+                    from deep_agent.aegra.mcp_crypto import encrypt_secret
+                    from deep_agent.aegra.redis import cache_get, cache_set
+
+                    if await asyncio.to_thread(cache_get, f"eval:active:{sub}"):
+                        encrypted_rt = encrypt_secret(new_rt)
+                        if encrypted_rt:
+                            await asyncio.to_thread(
+                                cache_set, f"eval:refresh:{sub}", encrypted_rt, 3600
+                            )
+
+        return new_token
     except Exception:
         logger.error("Token refresh failed — using original token", exc_info=True)
         return access_token
@@ -298,6 +317,10 @@ async def _resolve_connection_token(
     try:
         return await get_mcp_credential_resolver().resolve(user_id, name, entry)
     except NeedsAuthorization:
+        logger.info(
+            "[%s] no usable OAuth token during connection token resolution",
+            name,
+        )
         return None
 
 
@@ -354,9 +377,10 @@ def _create_auth_placeholder_tool(
     """Create a stub tool that triggers NeedsAuthorization when called.
 
     When an MCP server requires OAuth/DCR but the user hasn't authenticated yet,
-    we inject this placeholder. When the LLM calls it, NeedsAuthorization fires,
-    which mcp_tool_auth wraps into a LangGraph interrupt, and the UI shows the
-    connect button.
+    we inject this placeholder. When the LLM calls it, the stub tries to resolve
+    a token (including refresh). Failed refresh raises NeedsAuthorization, which
+    mcp_tool_auth wraps into a LangGraph interrupt so the UI shows the connect
+    button.
     """
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel
@@ -379,14 +403,29 @@ def _create_auth_placeholder_tool(
             resolver = get_mcp_credential_resolver()
             cfg = _get_server_configs().get(mcp_name, {})
             try:
-                if await resolver.has_valid_token(user_id, mcp_name, cfg):
-                    return (
-                        f"Successfully connected to {mcp_name}. "
-                        f"The tools are now available — please ask the user to "
-                        f"repeat their request so the updated tools can be loaded."
-                    )
+                # Resolve (and refresh if needed) instead of has_valid_token().
+                # A leftover refresh token must not skip re-auth after refresh fails.
+                await resolver.resolve(user_id, mcp_name, cfg)
+                invalidate_mcp_tool_cache(user_id)
+                logger.info(
+                    "[%s] placeholder tool resolved auth — "
+                    "tool cache invalidated, rebuild on next request",
+                    mcp_name,
+                )
+                return (
+                    f"Successfully connected to {mcp_name}. "
+                    f"The tools are now available — please ask the user to "
+                    f"repeat their request so the updated tools can be loaded."
+                )
+            except NeedsAuthorization:
+                raise
             except Exception:
-                pass
+                logger.warning(
+                    "[%s] placeholder tool auth resolve failed "
+                    "— falling through to NeedsAuthorization",
+                    mcp_name,
+                    exc_info=True,
+                )
 
         raise NeedsAuthorization(
             mcp_name,
@@ -484,8 +523,10 @@ async def _connect_single_server(
         except Exception as exc:
             if _is_needs_authorization(exc):
                 logger.info(
-                    "[%s] MCP OAuth required — returning auth placeholder tool",
+                    "[%s] MCP OAuth required — returning auth placeholder tool (%s: %s)",
                     name,
+                    type(exc).__name__,
+                    exc,
                 )
                 return prepare_tools_for_model(
                     [_create_auth_placeholder_tool(auth_key, server_cfg)],
@@ -495,8 +536,12 @@ async def _connect_single_server(
                 auth_mode = server_cfg.get("auth_mode", "sso")
                 if auth_mode in ("oauth", "dcr"):
                     logger.info(
-                        "[%s] MCP tool discovery auth failed — returning auth placeholder tool",
+                        "[%s] MCP tool discovery auth failed (auth_mode=%s) "
+                        "— returning auth placeholder tool (%s: %s)",
                         name,
+                        auth_mode,
+                        type(exc).__name__,
+                        exc,
                     )
                     return prepare_tools_for_model(
                         [_create_auth_placeholder_tool(auth_key, server_cfg)],
@@ -591,11 +636,22 @@ def _filter_by_names(
     return {k: v for k, v in enabled.items() if k in requested}
 
 
-def invalidate_mcp_tool_cache() -> None:
-    """Clear the global MCP tool list cache (e.g. after OAuth connect)."""
-    global _cached_tools, _cached_tools_ts  # noqa: PLW0603
-    _cached_tools = []
-    _cached_tools_ts = 0.0
+def invalidate_mcp_tool_cache(user_id: str | None = None) -> None:
+    """Clear the MCP tool cache.
+
+    When *user_id* is given, only that user's entry is removed.
+    When *user_id* is ``None``, the entire cache is cleared
+    (e.g. after a server-level config change).
+    """
+    if user_id is not None:
+        prefix = f"{user_id}:"
+        keys = [k for k in _cached_tools if k is not None and k.startswith(prefix)]
+        for k in keys:
+            _cached_tools.pop(k, None)
+            _cached_tools_ts.pop(k, None)
+    else:
+        _cached_tools.clear()
+        _cached_tools_ts.clear()
 
 
 async def get_mcp_tools(
@@ -632,19 +688,19 @@ async def get_mcp_tools(
     Returns:
         List of available MCP tools (empty list if all connections fail).
     """
-    global _cached_tools, _cached_tools_ts  # noqa: PLW0603
+    server_key = ",".join(sorted(server_names)) if server_names else ""
+    cache_key: str | None = f"{user_id}:{server_key}" if user_id else None
+    cached = _cached_tools.get(cache_key) if cache_key else None
+    cached_ts = _cached_tools_ts.get(cache_key, 0.0) if cache_key else 0.0
 
-    if (
-        _cached_tools
-        and len(_cached_tools) > 0
-        and (time.time() - _cached_tools_ts) < _MCP_TOOL_CACHE_TTL
-    ):
+    if cached and len(cached) > 0 and (time.time() - cached_ts) < _MCP_TOOL_CACHE_TTL:
         logger.info(
-            "MCP tool cache hit (%d tools, %.0fs old)",
-            len(_cached_tools),
-            time.time() - _cached_tools_ts,
+            "MCP tool cache hit (%d tools, %.0fs old, user=%s)",
+            len(cached),
+            time.time() - cached_ts,
+            cache_key or "anonymous",
         )
-        return _cached_tools
+        return cached
 
     servers: dict[str, dict[str, Any]] = _get_server_configs()
     enabled: dict[str, dict[str, Any]] = {
@@ -657,7 +713,9 @@ async def get_mcp_tools(
         logger.warning("No MCP servers enabled")
         return []
 
-    logger.warning(f"Connecting to {len(enabled)} MCP server(s): {', '.join(enabled)}")
+    logger.warning(
+        "Connecting to %d MCP server(s): %s", len(enabled), ", ".join(enabled)
+    )
 
     has_auth: bool = bool(sso_token or user_id)
     discovery_token = _mcp_tool_discovery.set(True)
@@ -723,9 +781,14 @@ async def get_mcp_tools(
             logger.warning("MCP tools deferred — no auth token at startup")
         return []
 
-    _cached_tools = tools
-    _cached_tools_ts = time.time()
-    logger.warning(
-        f"Loaded {len(tools)} MCP tool(s): {', '.join(seen)} (cached for {_MCP_TOOL_CACHE_TTL:.0f}s)"
+    if cache_key is not None:
+        _cached_tools[cache_key] = tools
+        _cached_tools_ts[cache_key] = time.time()
+    logger.info(
+        "Loaded %d MCP tool(s): %s (cached for %.0fs, user=%s)",
+        len(tools),
+        ", ".join(seen),
+        _MCP_TOOL_CACHE_TTL,
+        cache_key or "anonymous",
     )
     return tools

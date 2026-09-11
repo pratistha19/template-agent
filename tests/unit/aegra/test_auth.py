@@ -64,6 +64,98 @@ class TestBuildDevUser:
             user = _build_dev_user()
             assert user["identity"] == "custom-dev"
 
+    def test_dev_user_ldap_role_is_none(self):
+        """AUTH_ENABLED=false → ldap_role=None → full access (chat=Yes, eval=Yes)."""
+        user = _build_dev_user()
+        assert user["ldap_role"] is None
+
+
+class TestCheckLdapAccess:
+    """Tests the chat-access gate from the behavior matrix.
+
+    _check_ldap_access enforces the Chat column:
+        - None → pass (AUTH_ENABLED=false, full access)
+        - 'denied' → PermissionError (private + no match → 403)
+        - 'users' → pass (chat allowed)
+        - 'owners/admins/builders' → pass (chat allowed)
+    """
+
+    def test_none_passes(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        _check_ldap_access(None)
+
+    def test_denied_raises(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        with pytest.raises(PermissionError, match="not a member"):
+            _check_ldap_access("denied")
+
+    def test_users_passes(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        _check_ldap_access("users")
+
+    def test_owners_passes(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        _check_ldap_access("owners")
+
+    def test_admins_passes(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        _check_ldap_access("admins")
+
+    def test_builders_passes(self):
+        from deep_agent.aegra.auth import _check_ldap_access
+
+        _check_ldap_access("builders")
+
+
+class TestResolveLdapRole:
+    @pytest.mark.asyncio
+    async def test_extracts_preferred_username(self):
+        from deep_agent.aegra.auth import _resolve_ldap_role
+
+        payload = {"preferred_username": "alice", "sub": "uuid-1"}
+        with patch(
+            "deep_agent.src.ldap.service.resolve_user_role",
+            new_callable=AsyncMock,
+            return_value="owners",
+        ) as mock_resolve:
+            result = await _resolve_ldap_role(payload)
+        assert result == "owners"
+        mock_resolve.assert_called_once_with("alice")
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_sub(self):
+        from deep_agent.aegra.auth import _resolve_ldap_role
+
+        payload = {"sub": "bob"}
+        with patch(
+            "deep_agent.src.ldap.service.resolve_user_role",
+            new_callable=AsyncMock,
+            return_value="users",
+        ) as mock_resolve:
+            result = await _resolve_ldap_role(payload)
+        assert result == "users"
+        mock_resolve.assert_called_once_with("bob")
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_returns_denied(self):
+        from deep_agent.aegra.auth import _resolve_ldap_role
+
+        payload = {"sub": ""}
+        result = await _resolve_ldap_role(payload)
+        assert result == "denied"
+
+    @pytest.mark.asyncio
+    async def test_missing_claims_returns_denied(self):
+        from deep_agent.aegra.auth import _resolve_ldap_role
+
+        result = await _resolve_ldap_role({})
+        assert result == "denied"
+
 
 class TestResolveJwksUri:
     def test_explicit_jwks_uri(self):
@@ -345,6 +437,11 @@ class TestAuthenticate:
             patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
             patch("deep_agent.aegra.auth.EVAL_TOKEN_REFRESH_ENABLED", False),
             patch("deep_agent.aegra.auth._decode_token", return_value=payload),
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="users",
+            ),
         ):
             result = await authenticate(
                 {"authorization": "Bearer valid-token", "x-refresh-token": ""}
@@ -352,6 +449,7 @@ class TestAuthenticate:
 
         assert result["identity"] == "user-99"
         assert result["access_token"] == "valid-token"
+        assert result["ldap_role"] == "users"
 
     async def test_expired_token_raises_when_refresh_disabled(self):
         from deep_agent.aegra.auth import authenticate
@@ -382,6 +480,11 @@ class TestAuthenticate:
             patch("deep_agent.aegra.redis.cache_get", return_value="1") as mock_get,
             patch("deep_agent.aegra.redis.cache_set") as mock_set,
             patch("deep_agent.aegra.mcp_crypto.encrypt_secret", return_value="enc-rt"),
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="owners",
+            ),
         ):
             result = await authenticate(
                 {"authorization": "Bearer valid-tok", "x-refresh-token": "my-rt"}
@@ -402,6 +505,11 @@ class TestAuthenticate:
             patch("deep_agent.aegra.auth.EVAL_TOKEN_REFRESH_ENABLED", True),
             patch("deep_agent.aegra.auth._decode_token", return_value=payload),
             patch("deep_agent.aegra.redis.cache_set") as mock_set,
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="users",
+            ),
         ):
             result = await authenticate(
                 {"authorization": "Bearer tok", "x-refresh-token": ""}
@@ -465,3 +573,161 @@ class TestAuthenticate:
                 await authenticate(
                     {"authorization": "Bearer expired", "x-refresh-token": "rt"}
                 )
+
+    async def test_expired_token_cache_hit_returns_user(self):
+        """Line 259: cached access token is valid — return user without OIDC."""
+        from deep_agent.aegra.auth import authenticate
+
+        refreshed_payload = {"sub": "user-cache", "name": "Cached"}
+
+        def _cache_get(key: str) -> str | None:
+            if key == "eval:active:user-cache":
+                return "1"
+            if key == "eval:access:user-cache":
+                return "enc-access"
+            if key == "eval:refresh:user-cache":
+                return "enc-refresh"
+            return None
+
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch("deep_agent.aegra.auth.EVAL_TOKEN_REFRESH_ENABLED", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                side_effect=[pyjwt.ExpiredSignatureError(), refreshed_payload],
+            ),
+            patch("deep_agent.aegra.redis.get_redis_client", return_value=MagicMock()),
+            patch(
+                "deep_agent.aegra.auth._decode_sub_unverified",
+                return_value="user-cache",
+            ),
+            patch("deep_agent.aegra.redis.cache_get", side_effect=_cache_get),
+            patch(
+                "deep_agent.aegra.mcp_crypto.decrypt_secret",
+                side_effect=lambda v: f"dec-{v}",
+            ),
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="owners",
+            ),
+        ):
+            result = await authenticate(
+                {"authorization": "Bearer expired", "x-refresh-token": "rt"}
+            )
+
+        assert result["identity"] == "user-cache"
+        assert result["display_name"] == "Cached"
+
+    async def test_expired_token_lock_winner_refreshes(self):
+        """Line 299: lock holder refreshes via OIDC and returns user."""
+        from contextlib import asynccontextmanager
+
+        from deep_agent.aegra.auth import authenticate
+
+        refreshed_payload = {"sub": "user-winner", "name": "Winner"}
+
+        def _cache_get(key: str) -> str | None:
+            if key == "eval:active:user-winner":
+                return "1"
+            if key == "eval:refresh:user-winner":
+                return "enc-rt"
+            return None
+
+        @asynccontextmanager
+        async def _fake_lock(*a, **kw):
+            yield "held"
+
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch("deep_agent.aegra.auth.EVAL_TOKEN_REFRESH_ENABLED", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                side_effect=[pyjwt.ExpiredSignatureError(), refreshed_payload],
+            ),
+            patch("deep_agent.aegra.redis.get_redis_client", return_value=MagicMock()),
+            patch(
+                "deep_agent.aegra.auth._decode_sub_unverified",
+                return_value="user-winner",
+            ),
+            patch("deep_agent.aegra.redis.cache_get", side_effect=_cache_get),
+            patch("deep_agent.aegra.redis.cache_set"),
+            patch("deep_agent.aegra.redis.distributed_lock", _fake_lock),
+            patch(
+                "deep_agent.aegra.mcp_crypto.decrypt_secret", return_value="plain-rt"
+            ),
+            patch("deep_agent.aegra.mcp_crypto.encrypt_secret", return_value="enc-val"),
+            patch(
+                "deep_agent.aegra.auth._oidc_refresh",
+                return_value=("new-access", "new-rt"),
+            ),
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="owners",
+            ),
+        ):
+            result = await authenticate(
+                {"authorization": "Bearer expired", "x-refresh-token": "rt"}
+            )
+
+        assert result["identity"] == "user-winner"
+        assert result["display_name"] == "Winner"
+
+    async def test_expired_token_lock_loser_polls_cache(self):
+        """Line 315: lock loser polls until winner writes cached token."""
+        from contextlib import asynccontextmanager
+
+        from deep_agent.aegra.auth import authenticate
+
+        polled_payload = {"sub": "user-loser", "name": "Loser"}
+        poll_count = 0
+
+        def _cache_get(key: str) -> str | None:
+            nonlocal poll_count
+            if key == "eval:active:user-loser":
+                return "1"
+            if key == "eval:access:user-loser":
+                poll_count += 1
+                if poll_count >= 2:
+                    return "enc-polled-access"
+                return None
+            if key == "eval:refresh:user-loser":
+                return "enc-rt"
+            return None
+
+        @asynccontextmanager
+        async def _fake_lock(*a, **kw):
+            yield "timeout"
+
+        with (
+            patch("deep_agent.aegra.auth.ENABLE_AUTH", True),
+            patch("deep_agent.aegra.auth.EVAL_TOKEN_REFRESH_ENABLED", True),
+            patch(
+                "deep_agent.aegra.auth._decode_token",
+                side_effect=[pyjwt.ExpiredSignatureError(), polled_payload],
+            ),
+            patch("deep_agent.aegra.redis.get_redis_client", return_value=MagicMock()),
+            patch(
+                "deep_agent.aegra.auth._decode_sub_unverified",
+                return_value="user-loser",
+            ),
+            patch("deep_agent.aegra.redis.cache_get", side_effect=_cache_get),
+            patch("deep_agent.aegra.redis.distributed_lock", _fake_lock),
+            patch(
+                "deep_agent.aegra.mcp_crypto.decrypt_secret",
+                side_effect=lambda v: f"dec-{v}",
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "deep_agent.aegra.auth._resolve_ldap_role",
+                new_callable=AsyncMock,
+                return_value="owners",
+            ),
+        ):
+            result = await authenticate(
+                {"authorization": "Bearer expired", "x-refresh-token": "rt"}
+            )
+
+        assert result["identity"] == "user-loser"
+        assert result["display_name"] == "Loser"

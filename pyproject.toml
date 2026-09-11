@@ -5,6 +5,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["deep_agent"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"deep_agent/src/memory/memory_instructions.j2" = "deep_agent/src/memory/memory_instructions.j2"
+
 [tool.hatch.metadata]
 allow-direct-references = true
 
@@ -53,6 +56,7 @@ dependencies = [
     "litellm>=1.40.0",
     "aiokafka>=0.10.0",
     "msgpack==1.2.1",
+    "ldap3==2.9.1",
 ]
 
 [project.optional-dependencies]

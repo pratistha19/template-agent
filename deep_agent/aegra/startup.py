@@ -51,13 +51,13 @@ async def run_startup() -> dict[str, str]:
     results: dict[str, str] = {}
 
     results["config"] = await _validate_config()
+    results["ldap"] = _init_ldap()
     results["aegra_db"] = await _init_aegra_db()
     results["database"] = await _ensure_database()
     _check_mcp_encryption_key()
     results["resume"] = await _resume_interrupted_runs()
     results["mcp_apps"] = _setup_mcp_apps_capability()
     results["cache"] = await _warm_caches()
-    results["scheduler"] = await _start_scheduler()
     results["otel"] = _setup_otel()
     results["telemetry"] = _setup_telemetry()
 
@@ -82,6 +82,41 @@ def _upgrade_signal_handlers() -> None:
         register_signal_handlers()
     except Exception:
         logger.warning("Failed to register signal handlers", exc_info=True)
+
+
+def _init_ldap() -> str:
+    """Load PROMPT.md access config and validate LDAP settings."""
+    try:
+        from deep_agent.src.ldap.config import ldap_settings
+        from deep_agent.src.ldap.prompt_config import get_prompt_access_config
+
+        config = get_prompt_access_config()
+        group_count = len(config.groups) if config.groups else 0
+
+        if group_count == 0:
+            logger.info(
+                "LDAP access control: no groups in PROMPT.md — everyone gets users role"
+            )
+            return "ok: no groups configured"
+
+        if not ldap_settings.LDAP_URL:
+            logger.warning(
+                "LDAP access control: %d group(s) defined but LDAP_URL not set — "
+                "access will be denied (fail-closed) when accessibility=private",
+                group_count,
+            )
+            return f"warning: {group_count} group(s) but no LDAP_URL"
+
+        logger.info(
+            "LDAP access control: %d group(s), accessibility=%s, url=%s",
+            group_count,
+            config.accessibility,
+            ldap_settings.LDAP_URL,
+        )
+        return f"ok: {group_count} group(s), accessibility={config.accessibility}"
+    except Exception as exc:
+        logger.warning("LDAP init failed: %s", exc)
+        return f"warning: {exc}"
 
 
 async def _init_aegra_db() -> str:
@@ -374,24 +409,6 @@ async def _warm_caches() -> str:
         return "ok"
     except Exception as exc:
         logger.warning("Cache warming failed: %s", exc)
-        return f"warning: {exc}"
-
-
-async def _start_scheduler() -> str:
-    """Start background memory scheduler if enabled."""
-    try:
-        from deep_agent.src.memory.config import memory_settings
-
-        if not memory_settings.MEMORY_CONSOLIDATION_ENABLED:
-            return "skipped: memory consolidation disabled"
-
-        from deep_agent.src.memory.scheduler import start_scheduler
-        from deep_agent.src.settings import settings
-
-        started = await start_scheduler(settings.database_uri)
-        return "ok" if started else "skipped: already running"
-    except Exception as exc:
-        logger.warning("Scheduler start failed: %s", exc)
         return f"warning: {exc}"
 
 

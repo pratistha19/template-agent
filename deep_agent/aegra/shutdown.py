@@ -26,9 +26,8 @@ Shutdown sequence (within ``terminationGracePeriodSeconds: 60``):
     1. Set ``_shutting_down`` flag → health probes return 503
     2. Drain period — in-flight requests finish (async path only)
     3. Flush and stop Langfuse
-    4. Stop memory scheduler (async path only)
-    5. Clear graph cache
-    6. Close Redis
+    4. Clear graph cache
+    5. Close Redis
 """
 
 import asyncio
@@ -49,26 +48,18 @@ SHUTDOWN_DRAIN_SECONDS = int(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "15"))
 SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS = int(
     os.environ.get("SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS", "5")
 )
-SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS = int(
-    os.environ.get("SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS", "10")
-)
 SHUTDOWN_GRACE_PERIOD_SECONDS = int(
     os.environ.get("SHUTDOWN_GRACE_PERIOD_SECONDS", "60")
 )
 
-_TOTAL_BUDGET = (
-    SHUTDOWN_DRAIN_SECONDS
-    + SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS
-    + SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS
-)
+_TOTAL_BUDGET = SHUTDOWN_DRAIN_SECONDS + SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS
 _HEADROOM = SHUTDOWN_GRACE_PERIOD_SECONDS - _TOTAL_BUDGET
 if _HEADROOM < 5:
     logger.warning(
-        "Shutdown budget (%ds drain + %ds langfuse + %ds scheduler = %ds) "
+        "Shutdown budget (%ds drain + %ds langfuse = %ds) "
         "leaves only %ds before SIGKILL at %ds. Risk of incomplete cleanup.",
         SHUTDOWN_DRAIN_SECONDS,
         SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS,
-        SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS,
         _TOTAL_BUDGET,
         _HEADROOM,
         SHUTDOWN_GRACE_PERIOD_SECONDS,
@@ -131,6 +122,7 @@ def run_shutdown_sync() -> None:
         ("otel", _shutdown_otel),
         ("langfuse", _shutdown_langfuse_sync),
         ("graph_cache", _clear_graph_cache),
+        ("ldap", _close_ldap_sync),
         ("redis", _close_redis),
     ]:
         try:
@@ -213,8 +205,8 @@ async def run_shutdown() -> dict[str, str]:
         ("inflight", _persist_inflight_runs),
         ("otel", _shutdown_otel),
         ("langfuse", _shutdown_langfuse),
-        ("scheduler", _stop_scheduler),
         ("graph_cache", _clear_graph_cache),
+        ("ldap", _close_ldap),
         ("redis", _close_redis),
     ]:
         try:
@@ -318,25 +310,6 @@ def _langfuse_shutdown_blocking(client: Any) -> None:
         client.flush()
 
 
-async def _stop_scheduler() -> str:
-    try:
-        from deep_agent.src.memory.scheduler import stop_scheduler
-
-        await asyncio.wait_for(
-            stop_scheduler(),
-            timeout=SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS,
-        )
-        return "ok"
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Scheduler stop timed out after %ds", SHUTDOWN_SCHEDULER_TIMEOUT_SECONDS
-        )
-        return "timeout"
-    except Exception as exc:
-        logger.warning("Scheduler stop failed: %s", exc)
-        return f"error: {exc}"
-
-
 def _clear_graph_cache() -> str:
     try:
         from deep_agent.aegra.graph import _graph_cache, _graph_cache_ts
@@ -361,6 +334,30 @@ def _shutdown_otel() -> str:
         return "ok"
     except Exception as exc:
         logger.warning("OTEL shutdown failed: %s", exc)
+        return f"error: {exc}"
+
+
+async def _close_ldap() -> str:
+    """Close the LDAP connection and clear the membership cache."""
+    try:
+        from deep_agent.src.ldap.service import close_ldap
+
+        await asyncio.to_thread(close_ldap)
+        return "ok"
+    except Exception as exc:
+        logger.warning("LDAP close failed: %s", exc)
+        return f"error: {exc}"
+
+
+def _close_ldap_sync() -> str:
+    """Close the LDAP connection synchronously (atexit path)."""
+    try:
+        from deep_agent.src.ldap.service import close_ldap
+
+        close_ldap()
+        return "ok"
+    except Exception as exc:
+        logger.warning("LDAP close failed: %s", exc)
         return f"error: {exc}"
 
 

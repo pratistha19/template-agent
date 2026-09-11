@@ -182,6 +182,143 @@ Bad agent.
         assert "must be a list of strings" in caplog.text
 
 
+class TestResourcesValidation:
+    """Test optional resources URI allowlist frontmatter."""
+
+    def setup_method(self):
+        AgentConfig._instance = None
+
+    def test_orchestrator_omits_resources_key(self, tmp_path):
+        """Missing resources means allow-all later — do not default to []."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+---
+Orchestrator.
+""")
+
+        cfg = AgentConfig(config_dir)
+        orch = cfg.get_orchestrator_config()
+        assert "resources" not in orch
+
+    def test_orchestrator_valid_resources(self, tmp_path):
+        """Valid resources list of URI strings loads without error."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+resources:
+  - template://about
+  - template://echo/{text}
+---
+Orchestrator.
+""")
+
+        cfg = AgentConfig(config_dir)
+        orch = cfg.get_orchestrator_config()
+        assert orch["resources"] == ["template://about", "template://echo/{text}"]
+
+    def test_orchestrator_empty_resources_list(self, tmp_path):
+        """Loader preserves empty list; wiring normalizes to unrestricted (same as omit)."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+resources: []
+---
+Orchestrator.
+""")
+
+        cfg = AgentConfig(config_dir)
+        orch = cfg.get_orchestrator_config()
+        assert orch["resources"] == []
+
+    def test_orchestrator_invalid_resources_raises(self, tmp_path):
+        """Non-list resources raises AppException."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+resources: "not-a-list"
+---
+Orchestrator.
+""")
+
+        with pytest.raises(AppException, match="must be a list of strings"):
+            cfg = AgentConfig(config_dir)
+            cfg.get_orchestrator_config()
+
+    def test_subagent_valid_resources(self, tmp_path):
+        """Subagent resources list of strings is kept on the config."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+---
+Orchestrator.
+""")
+
+        sub_dir = config_dir / "subagents"
+        sub_dir.mkdir()
+        (sub_dir / "analyst.md").write_text("""---
+name: analyst
+model: gemini-2.5-flash
+resources:
+  - template://about
+---
+Analyst.
+""")
+
+        cfg = AgentConfig(config_dir)
+        subs = cfg.get_all_subagent_configs()
+        assert subs["analyst"]["resources"] == ["template://about"]
+
+    def test_subagent_invalid_resources_is_skipped(self, tmp_path, caplog):
+        """Subagent with non-string resources entries is skipped and logged."""
+        config_dir = tmp_path / "agent_config"
+        config_dir.mkdir()
+        (config_dir / "skills").mkdir()
+
+        (config_dir / "PROMPT.md").write_text("""---
+name: orch
+model: gemini-2.5-flash
+---
+Orchestrator.
+""")
+
+        sub_dir = config_dir / "subagents"
+        sub_dir.mkdir()
+        (sub_dir / "bad.md").write_text("""---
+name: bad-agent
+model: gemini-2.5-flash
+resources:
+  - 123
+---
+Bad agent.
+""")
+
+        cfg = AgentConfig(config_dir)
+        subs = cfg.get_all_subagent_configs()
+        assert "bad-agent" not in subs
+        assert "must be a list of strings" in caplog.text
+
+
 class TestLoadGuardrailsConfig:
     """Tests for _load_guardrails_config taking agent_yaml_guardrail dict."""
 

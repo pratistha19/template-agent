@@ -102,6 +102,8 @@ def _graph_fingerprint(
     hitl_exclude: list[str] | None = None,
     temperature: float = 0.0,
     max_tokens: int | None = None,
+    mcp_names: list[str] | None = None,
+    resource_uris: list[str] | None = None,
 ) -> str:
     """Stable fingerprint for graph cache keying."""
     hitl_flag = (
@@ -110,7 +112,12 @@ def _graph_fingerprint(
         f",exclude={','.join(sorted(hitl_exclude or []))}"
     )
     model_flag = f"temp={temperature},max_tokens={max_tokens}"
-    raw = f"{model_name}\0{system_prompt}\0{','.join(sorted(tool_names))}\0{hitl_flag}\0{model_flag}"
+    mcp_flag = ",".join(sorted(mcp_names or []))
+    resources_flag = ",".join(sorted(resource_uris or []))
+    raw = (
+        f"{model_name}\0{system_prompt}\0{','.join(sorted(tool_names))}"
+        f"\0{hitl_flag}\0{model_flag}\0{mcp_flag}\0{resources_flag}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -202,6 +209,24 @@ async def _active_rule_contents(user_ids: list[str]) -> list[str]:
     return contents
 
 
+def _exclude_resource_read_from_eviction() -> None:
+    """Ensure ``mcp_read_resource`` is on the FilesystemMiddleware eviction skip list.
+
+    The host tool already paginates and char-truncates its output, so
+    FilesystemMiddleware eviction is redundant. Adding to the skip list
+    prevents a double cap if deepagents ever lowers ``tool_token_limit_before_evict``.
+    """
+    from deepagents.middleware import filesystem as _fs
+
+    from deep_agent.aegra.mcp_resource_tools import READ_TOOL
+
+    if READ_TOOL not in _fs.TOOLS_EXCLUDED_FROM_EVICTION:
+        _fs.TOOLS_EXCLUDED_FROM_EVICTION = (
+            *_fs.TOOLS_EXCLUDED_FROM_EVICTION,
+            READ_TOOL,
+        )
+
+
 async def agent(runtime: ServerRuntime) -> Any:
     """Async graph factory — invoked per-request by Aegra.
 
@@ -219,6 +244,7 @@ async def agent(runtime: ServerRuntime) -> Any:
         A compiled deep-agent graph (``CompiledStateGraph``).
     """
     await _ensure_startup()
+    _exclude_resource_read_from_eviction()
 
     from deepagents import create_deep_agent
 
@@ -227,6 +253,7 @@ async def agent(runtime: ServerRuntime) -> Any:
         refresh_access_token,
         set_mcp_auth_context,
     )
+    from deep_agent.aegra.mcp_resource_tools import get_mcp_resource_tools
     from deep_agent.aegra.mcp_tool_auth import wrap_mcp_tools_for_auth
     from deep_agent.src.agent.config import agent_config
     from deep_agent.src.infrastructure.async_tasks import build_async_middleware
@@ -239,11 +266,17 @@ async def agent(runtime: ServerRuntime) -> Any:
     user = getattr(runtime, "user", None)
     sso_token = getattr(user, "access_token", None) if user else None
     refresh_token = getattr(user, "refresh_token", None) if user else None
+    user_identity = getattr(user, "identity", None) if user else None
 
     if sso_token:
-        sso_token = await refresh_access_token(sso_token, refresh_token)
+        sso_token = await refresh_access_token(
+            sso_token, refresh_token, user_id=user_identity
+        )
+        from deep_agent.aegra.mcp import _user_token_cache
 
-    user_identity = getattr(user, "identity", None) if user else None
+        cached = _user_token_cache.get(user_identity) if user_identity else None
+        if cached:
+            refresh_token = cached[1]
 
     set_mcp_auth_context(sso_token, refresh_token, user_identity)
     orchestrator_cfg = agent_config.get_orchestrator_config()
@@ -339,6 +372,14 @@ async def agent(runtime: ServerRuntime) -> Any:
             )
             tools.extend(extra)
 
+    resource_tools = wrap_mcp_tools_for_auth(
+        get_mcp_resource_tools(
+            server_names=mcp_server_names or None,
+            allowed_uris=orchestrator_cfg.get("resources") or None,
+        )
+    )
+    tools.extend(resource_tools)
+
     from deep_agent.src.infrastructure.middleware import (
         build_middleware_list,
         resolve_memory_param,
@@ -383,6 +424,8 @@ async def agent(runtime: ServerRuntime) -> Any:
         hitl_exclude=hitl.exclude if hitl else [],
         temperature=float(orch_temperature),
         max_tokens=int(orch_max_tokens) if orch_max_tokens else None,
+        mcp_names=mcp_server_names or None,
+        resource_uris=orchestrator_cfg.get("resources") or None,
     )
     now = time.time()
     graph_ttl = float(agent_config.get_cache_config().graph.ttl)
@@ -401,7 +444,8 @@ async def agent(runtime: ServerRuntime) -> Any:
         resolved_mw,
         model=model,
         backend=backend,
-        mcp_tool_names=frozenset(t.name for t in mcp_tools),
+        mcp_tool_names=frozenset(t.name for t in mcp_tools)
+        | frozenset(t.name for t in resource_tools),
     )
     memory = resolve_memory_param(resolved_mw) if user_memory_enabled else None
 

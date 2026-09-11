@@ -318,19 +318,23 @@ class AgentConfig:
         return self._base_dir
 
     @staticmethod
-    def _validate_mcps_field(mcps: Any, agent_name: str) -> None:
-        """Validate the ``mcps`` frontmatter field is a list of strings.
+    def _validate_string_list_field(value: Any, agent_name: str, *, field: str) -> None:
+        """Validate a frontmatter field is a list of strings.
+
+        Missing keys are not passed here — omit means “no restriction”
+        for ``resources`` (allow all) and “unset” for ``mcps``.
 
         Args:
-            mcps: The raw value from frontmatter.
+            value: Raw frontmatter value.
             agent_name: Agent name for error messages.
+            field: Frontmatter key (``mcps`` or ``resources``).
 
         Raises:
-            AppException: If ``mcps`` is not a list of strings.
+            AppException: If *value* is not a list of strings.
         """
-        if not isinstance(mcps, list) or not all(isinstance(s, str) for s in mcps):
+        if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
             raise AppException(
-                f"Agent '{agent_name}': 'mcps' must be a list of strings",
+                f"Agent '{agent_name}': '{field}' must be a list of strings",
                 ErrorCodes.CONFIGURATION_VALIDATION_ERROR,
             )
 
@@ -349,9 +353,14 @@ class AgentConfig:
             if "body" in config:
                 config["body"] = inject_runtime_values(config["body"])
 
+            agent_name = config.get("name", "orchestrator")
             if "mcps" in config:
-                self._validate_mcps_field(
-                    config["mcps"], config.get("name", "orchestrator")
+                self._validate_string_list_field(
+                    config["mcps"], agent_name, field="mcps"
+                )
+            if "resources" in config:
+                self._validate_string_list_field(
+                    config["resources"], agent_name, field="resources"
                 )
 
             # Resolve skill names to paths eagerly
@@ -457,7 +466,11 @@ class AgentConfig:
                 name = config.get("name", agent_file.stem)
 
                 if "mcps" in config:
-                    self._validate_mcps_field(config["mcps"], name)
+                    self._validate_string_list_field(config["mcps"], name, field="mcps")
+                if "resources" in config:
+                    self._validate_string_list_field(
+                        config["resources"], name, field="resources"
+                    )
 
                 # Resolve skill names to paths eagerly
                 skill_names = config.get("skills", [])

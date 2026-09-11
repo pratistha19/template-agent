@@ -154,6 +154,11 @@ def _inherit_from_orchestrator(
             )
             agent_cfg["mcps"] = list(parent_mcps)
 
+    if "resources" not in agent_cfg:
+        parent_resources = orchestrator_cfg.get("resources")
+        if parent_resources is not None:
+            agent_cfg["resources"] = list(parent_resources)
+
 
 def _normalize_model_to_dict(
     raw_model: Any,
@@ -375,6 +380,24 @@ def _build_single_subagent(
     return _build_default_subagent(name, agent_cfg, tools)
 
 
+def _append_mcp_resource_tools(
+    resolved_tools: list[Any], agent_cfg: dict[str, Any]
+) -> list[Any]:
+    """Append host resource tools using this subagent's mcps/resources allowlists."""
+    from deep_agent.aegra.mcp_resource_tools import get_mcp_resource_tools
+    from deep_agent.aegra.mcp_tool_auth import wrap_mcp_tools_for_auth
+
+    extra = wrap_mcp_tools_for_auth(
+        get_mcp_resource_tools(
+            server_names=agent_cfg.get("mcps") or None,
+            allowed_uris=agent_cfg.get("resources") or None,
+        )
+    )
+    if not extra:
+        return resolved_tools
+    return [*resolved_tools, *extra]
+
+
 def _build_default_subagent(
     name: str,
     agent_cfg: dict[str, Any],
@@ -409,6 +432,8 @@ def _build_default_subagent(
         resolved_tools = list(tools)
     else:
         resolved_tools = []
+
+    resolved_tools = _append_mcp_resource_tools(resolved_tools, agent_cfg)
 
     skill_paths: list[str] = agent_cfg.get("skill_paths", [])
 
@@ -486,6 +511,7 @@ def _build_compiled_subagent(
         resolved_tools = list(tools)
     else:
         resolved_tools = []
+    resolved_tools = _append_mcp_resource_tools(resolved_tools, agent_cfg)
     skill_paths: list[str] = agent_cfg.get("skill_paths", [])
 
     # Build fallback middleware if spec has fallback configured

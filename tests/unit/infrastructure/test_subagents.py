@@ -9,6 +9,16 @@ from deep_agent.src.exceptions import SubAgentError
 from deep_agent.src.infrastructure.subagents import VALID_AGENT_TYPES, load_subagents
 
 
+@pytest.fixture(autouse=True)
+def _no_mcp_resource_tools():
+    """Keep existing tool-list assertions hermetic; override in resource tests."""
+    with patch(
+        "deep_agent.aegra.mcp_resource_tools.get_mcp_resource_tools",
+        return_value=[],
+    ) as mock:
+        yield mock
+
+
 class TestLoadSubagents:
     """Tests for load_subagents function."""
 
@@ -1235,3 +1245,299 @@ class TestGuardianActivationGate:
 
         mock_wrap.assert_not_called()
         mock_safety_cls.assert_not_called()
+
+
+class TestMcpResourceToolsOnSubagents:
+    """Resource tools are appended per subagent, even with an explicit tools: list."""
+
+    def test_default_explicit_tools_still_gets_resource_tools(
+        self, _no_mcp_resource_tools
+    ):
+        resource_tool = MagicMock()
+        resource_tool.name = "mcp_list_resources"
+        _no_mcp_resource_tools.return_value = [resource_tool]
+        mock_tool = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.GUARDIAN_API_BASE = ""
+
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "analyst": {
+                        "name": "analyst",
+                        "model": "gemini-2.5-flash",
+                        "description": "Analyst",
+                        "body": "Prompt",
+                        "tools": ["calculate_bmi"],
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
+                return_value=[mock_tool],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.SubAgent",
+                return_value=MagicMock(),
+            ) as mock_sa,
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            load_subagents(tools=[mock_tool])
+
+        assert mock_sa.call_args.kwargs["tools"] == [mock_tool, resource_tool]
+        _no_mcp_resource_tools.assert_called_once_with(
+            server_names=None, allowed_uris=None
+        )
+
+    def test_default_passes_agent_mcps_and_resources(self, _no_mcp_resource_tools):
+        mock_settings = MagicMock()
+        mock_settings.GUARDIAN_API_BASE = ""
+
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "analyst": {
+                        "name": "analyst",
+                        "model": "gemini-2.5-flash",
+                        "description": "Analyst",
+                        "body": "Prompt",
+                        "tools": ["calculate_bmi"],
+                        "mcps": ["keep-me"],
+                        "resources": ["template://about"],
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
+                return_value=[MagicMock()],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.SubAgent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            load_subagents(tools=[])
+
+        _no_mcp_resource_tools.assert_called_once_with(
+            server_names=["keep-me"], allowed_uris=["template://about"]
+        )
+
+    def test_default_resources_empty_allows_all(self, _no_mcp_resource_tools):
+        mock_tool = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.GUARDIAN_API_BASE = ""
+
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "analyst": {
+                        "name": "analyst",
+                        "model": "gemini-2.5-flash",
+                        "description": "Analyst",
+                        "body": "Prompt",
+                        "tools": ["calculate_bmi"],
+                        "resources": [],
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
+                return_value=[mock_tool],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.SubAgent",
+                return_value=MagicMock(),
+            ) as mock_sa,
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            load_subagents(tools=[mock_tool])
+
+        assert mock_sa.call_args.kwargs["tools"] == [mock_tool]
+        _no_mcp_resource_tools.assert_called_once_with(
+            server_names=None, allowed_uris=None
+        )
+
+    def test_default_inherits_orchestrator_resources(self, _no_mcp_resource_tools):
+        mock_settings = MagicMock()
+        mock_settings.GUARDIAN_API_BASE = ""
+
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "analyst": {
+                        "name": "analyst",
+                        "model": "gemini-2.5-flash",
+                        "description": "Analyst",
+                        "body": "Prompt",
+                        "tools": ["calculate_bmi"],
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={"resources": ["template://about"]},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
+                return_value=[MagicMock()],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.SubAgent",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch(
+                "deep_agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            load_subagents(tools=[])
+
+        _no_mcp_resource_tools.assert_called_once_with(
+            server_names=None, allowed_uris=["template://about"]
+        )
+
+    def test_compiled_explicit_tools_still_gets_resource_tools(
+        self, _no_mcp_resource_tools
+    ):
+        resource_tool = MagicMock()
+        resource_tool.name = "mcp_list_resources"
+        _no_mcp_resource_tools.return_value = [resource_tool]
+        mock_tool = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.GUARDIAN_API_BASE = ""
+
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "analyst": {
+                        "name": "analyst",
+                        "type": "compiled",
+                        "model": "gemini-2.5-pro",
+                        "description": "Fast analyst",
+                        "body": "Prompt",
+                        "tools": ["calculate_bmi"],
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_orchestrator_config",
+                return_value={},
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.resolve_tools",
+                return_value=[mock_tool],
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.get_or_create_model_from_spec",
+                return_value=MagicMock(),
+            ),
+            patch("deepagents.create_deep_agent") as mock_create_agent,
+            patch(
+                "deep_agent.src.infrastructure.backend.get_configured_backend",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.CompiledSubAgent",
+                return_value=MagicMock(),
+            ),
+            patch("deep_agent.src.settings.settings", mock_settings),
+            patch("deep_agent.src.pii.get_scrubber", return_value=None),
+        ):
+            load_subagents(tools=[mock_tool])
+
+        assert mock_create_agent.call_args.kwargs["tools"] == [
+            mock_tool,
+            resource_tool,
+        ]
+        _no_mcp_resource_tools.assert_called_once_with(
+            server_names=None, allowed_uris=None
+        )
+
+    def test_async_subagent_does_not_attach_resource_tools(
+        self, _no_mcp_resource_tools
+    ):
+        with (
+            patch(
+                "deep_agent.src.infrastructure.subagents.agent_config.get_all_subagent_configs",
+                return_value={
+                    "researcher": {
+                        "name": "researcher",
+                        "type": "async",
+                        "description": "Remote researcher",
+                        "body": "",
+                        "graph_id": "researcher-graph",
+                        "url": "http://research-agent:8000",
+                    }
+                },
+            ),
+            patch(
+                "deep_agent.src.infrastructure.subagents.AsyncSubAgent",
+                return_value=MagicMock(),
+            ),
+        ):
+            load_subagents(tools=[])
+
+        _no_mcp_resource_tools.assert_not_called()

@@ -57,6 +57,12 @@ _current_refresh_token: contextvars.ContextVar[str | None] = contextvars.Context
 _current_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_user_id", default=None
 )
+
+# Cross-task shared token cache keyed by user_id.
+# ContextVars are task-local in asyncio, so a refresh completed in one task
+# is invisible to a concurrent task for the same user.  This dict lets the
+# distributed-lock peer-check work across tasks.
+_user_token_cache: dict[str, tuple[str, str]] = {}
 _mcp_tool_discovery: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_mcp_tool_discovery", default=False
 )
@@ -190,27 +196,38 @@ def _jwt_exp(token: str) -> float:
         return 0.0
 
 
+_SSO_REFRESH_BUFFER_SECS: float = 60.0
+
+_sso_refresh_lock: asyncio.Lock = asyncio.Lock()
+
+
 async def refresh_access_token(
     access_token: str,
     refresh_token: str | None,
+    user_id: str | None = None,
 ) -> str:
     """Return a fresh access token, using the refresh_token grant if needed.
 
-    If the current ``access_token`` has more than 30 seconds of remaining
-    lifetime it is returned as-is.  Otherwise, if a ``refresh_token`` and
-    the OIDC token endpoint are available, the token is refreshed via the
-    standard ``refresh_token`` grant.
+    Proactively refreshes when fewer than 60 seconds remain (up from 30)
+    so long-running tool chains are less likely to hit expiry mid-call.
+
+    Uses a distributed Redis lock (falling back to an in-process asyncio
+    lock) to prevent concurrent refresh calls from racing — important when
+    Keycloak refresh-token rotation is enabled, as the old refresh token is
+    invalidated on first use.
 
     Args:
         access_token: Current JWT access token (may be expired).
         refresh_token: OIDC refresh token (may be ``None`` or ``""``).
+        user_id: Explicit user identity for the lock key. Falls back to
+            ``_current_user_id`` context var if not provided.
 
     Returns:
         A valid access token (refreshed if necessary, original if refresh
         is unavailable or fails).
     """
     remaining: float = _jwt_exp(access_token) - time.time()
-    if remaining > 30:
+    if remaining > _SSO_REFRESH_BUFFER_SECS:
         logger.debug("Access token still valid (%.0fs remaining)", remaining)
         return access_token
 
@@ -227,6 +244,71 @@ async def refresh_access_token(
         logger.warning("Cannot refresh token — SSO_ISSUER_URL or SSO_CLIENT_ID not set")
         return access_token
 
+    resolved_user_id = user_id or _current_user_id.get() or "unknown"
+    return await _locked_sso_refresh(
+        access_token, refresh_token, remaining, resolved_user_id
+    )
+
+
+async def _locked_sso_refresh(
+    access_token: str,
+    refresh_token: str,
+    remaining: float,
+    user_id: str = "unknown",
+) -> str:
+    """Perform the actual SSO refresh under a lock to prevent concurrent races."""
+    from deep_agent.aegra.redis import distributed_lock
+
+    lock_name = f"sso:refresh:{user_id}"
+
+    async with distributed_lock(lock_name, ttl_seconds=15, wait_seconds=10) as state:
+        cached = _user_token_cache.get(user_id)
+        if state == "no_redis":
+            async with _sso_refresh_lock:
+                cached = _user_token_cache.get(user_id)
+                if cached:
+                    cached_at, cached_rt = cached
+                    if cached_at != access_token:
+                        check_remaining = _jwt_exp(cached_at) - time.time()
+                        if check_remaining > _SSO_REFRESH_BUFFER_SECS:
+                            logger.debug(
+                                "SSO token already refreshed by peer (no-redis path)"
+                            )
+                            return cached_at
+                latest_rt = (cached[1] if cached else None) or refresh_token
+                return await _do_sso_refresh(access_token, latest_rt, remaining)
+        elif state == "timeout":
+            if cached:
+                cached_at, _ = cached
+                if cached_at != access_token:
+                    check_remaining = _jwt_exp(cached_at) - time.time()
+                    if check_remaining > _SSO_REFRESH_BUFFER_SECS:
+                        logger.info(
+                            "SSO refresh lock timeout — another task refreshed (%.0fs left)",
+                            check_remaining,
+                        )
+                        return cached_at
+            logger.warning("SSO refresh lock timeout — using current token")
+            return access_token
+        else:
+            cached = _user_token_cache.get(user_id)
+            if cached:
+                cached_at, cached_rt = cached
+                if cached_at != access_token:
+                    check_remaining = _jwt_exp(cached_at) - time.time()
+                    if check_remaining > _SSO_REFRESH_BUFFER_SECS:
+                        logger.debug("SSO token already refreshed by another task")
+                        return cached_at
+            latest_rt = (cached[1] if cached else None) or refresh_token
+            return await _do_sso_refresh(access_token, latest_rt, remaining)
+
+
+async def _do_sso_refresh(
+    access_token: str,
+    refresh_token: str,
+    remaining: float,
+) -> str:
+    """Execute the OIDC refresh grant and update context vars."""
     logger.info("Refreshing SSO access token (%.0fs remaining)", remaining)
     try:
         from deep_agent.aegra.auth import EVAL_TOKEN_REFRESH_ENABLED, _oidc_refresh
@@ -238,18 +320,19 @@ async def refresh_access_token(
         _current_access_token.set(new_token)
         if new_rt != refresh_token:
             _current_refresh_token.set(new_rt)
+        sub = _current_user_id.get()
+        if sub:
+            _user_token_cache[sub] = (new_token, new_rt)
             if EVAL_TOKEN_REFRESH_ENABLED:
-                sub = _current_user_id.get()
-                if sub:
-                    from deep_agent.aegra.mcp_crypto import encrypt_secret
-                    from deep_agent.aegra.redis import cache_get, cache_set
+                from deep_agent.aegra.mcp_crypto import encrypt_secret
+                from deep_agent.aegra.redis import cache_get, cache_set
 
-                    if await asyncio.to_thread(cache_get, f"eval:active:{sub}"):
-                        encrypted_rt = encrypt_secret(new_rt)
-                        if encrypted_rt:
-                            await asyncio.to_thread(
-                                cache_set, f"eval:refresh:{sub}", encrypted_rt, 3600
-                            )
+                if await asyncio.to_thread(cache_get, f"eval:active:{sub}"):
+                    encrypted_rt = encrypt_secret(new_rt)
+                    if encrypted_rt:
+                        await asyncio.to_thread(
+                            cache_set, f"eval:refresh:{sub}", encrypted_rt, 3600
+                        )
 
         return new_token
     except Exception:

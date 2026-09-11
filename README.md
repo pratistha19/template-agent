@@ -291,6 +291,13 @@ tools:
 - **Subagent:** add `mcps:` to `config/agent/subagents/<name>.md` frontmatter.
 - **Inheritance:** subagents without `mcps` inherit the orchestrator's list.
 - **Validation:** every name in `mcps` must exist in `mcp.json` with `enabled: true`.
+- **Resources:** optional `resources:` list of URI / `uriTemplate` strings (not resource names). Omit the key (or pass `[]`) to allow all URIs on the agent's MCP servers; list specific URIs to allowlist. Subagents without `resources:` inherit the orchestrator's list. Server scope follows `mcps:` if set, otherwise all enabled servers in `mcp.json`.
+
+```yaml
+resources:
+  - template://about
+  - template://echo/{text}
+```
 
 See `config/agent/mcp.json` for working SSO and DCR examples.
 

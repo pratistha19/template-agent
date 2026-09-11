@@ -14,13 +14,47 @@ spec:
       labels:
         component: cache
     spec:
+      initContainers:
+        - name: validate-rdb
+          image: redis:7-alpine
+          command:
+            - sh
+            - -c
+            - |
+              rm -rf /data/appendonlydir
+              if [ -f /data/dump.rdb ]; then
+                if redis-check-rdb /data/dump.rdb > /dev/null 2>&1; then
+                  echo "RDB file valid"
+                else
+                  echo "RDB file corrupt — removing"
+                  rm -f /data/dump.rdb
+                fi
+              fi
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
       containers:
         - name: redis
           image: redis:7-alpine
           command:
             - redis-server
             - --appendonly
-            - "yes"
+            - "no"
+            - --save
+            - "60 1"
             - --maxmemory
             - "256mb"
             - --maxmemory-policy

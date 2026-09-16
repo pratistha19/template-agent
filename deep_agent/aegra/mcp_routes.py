@@ -127,7 +127,9 @@ async def mcp_reregister(mcp_name: str, request: Request) -> JSONResponse:
             content={"detail": "DCR is disabled"},
         )
 
-    await _authenticated_user_id(request)
+    from deep_agent.aegra.auth_helpers import check_ldap_role
+
+    await check_ldap_role(request, developer_only=True)
     result = await handle_mcp_reregister(mcp_name)
     return JSONResponse(content=result)
 

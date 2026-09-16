@@ -385,11 +385,15 @@ def _require_interactive_oauth(mcp_name: str, server_cfg: dict[str, Any]) -> Non
 
 
 async def handle_mcp_reregister(mcp_name: str) -> dict[str, Any]:
-    """Delete existing DCR client credentials and re-register with current config URLs.
+    """Re-register DCR client credentials with current config URLs.
 
     Call this when any DCR-related URL changes (authorization_endpoint,
     token_endpoint, registration_endpoint, server url, or redirect_uri)
     so that stale client_id/client_secret are replaced.
+
+    Uses upsert semantics — the new registration atomically replaces the
+    stored record only after a successful response from the authorization
+    server, so existing credentials remain intact on failure.
     """
     server_cfg = _get_mcp_server_config(mcp_name)
     auth_mode = server_cfg.get("auth_mode", "sso")
@@ -401,15 +405,6 @@ async def handle_mcp_reregister(mcp_name: str) -> dict[str, Any]:
 
     oauth_cfg = server_cfg.get("oauth") or {}
     current_agent_name = settings.agent_deployment_id
-    store = McpTokenStore(settings.database_uri)
-
-    deleted = await store.delete_client(current_agent_name, mcp_name)
-    logger.info(
-        "DCR re-register for '%s' (agent '%s'): old client deleted=%s",
-        mcp_name,
-        current_agent_name,
-        deleted,
-    )
 
     client_id, _ = await _register_dcr_client(
         current_agent_name, mcp_name, oauth_cfg, server_cfg

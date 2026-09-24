@@ -399,7 +399,7 @@ class TestTokenInjectorInterceptorFallback:
             return_value=mock_resolver,
         ):
             with pytest.raises(
-                RuntimeError, match="oauth credential resolution failed"
+                RuntimeError, match=r"\[test-mcp\] oauth credential resolution failed"
             ) as exc_info:
                 await interceptor(request, handler)
             assert exc_info.value.__cause__ is not None
@@ -424,7 +424,7 @@ class TestTokenInjectorInterceptorFallback:
             return_value=mock_resolver,
         ):
             with pytest.raises(
-                RuntimeError, match="dcr credential resolution failed"
+                RuntimeError, match=r"\[test-mcp\] dcr credential resolution failed"
             ) as exc_info:
                 await interceptor(request, handler)
             assert isinstance(exc_info.value.__cause__, ConnectionError)

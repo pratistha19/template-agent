@@ -400,8 +400,10 @@ class TestTokenInjectorInterceptorFallback:
             "deep_agent.aegra.mcp_auth.get_mcp_credential_resolver",
             return_value=mock_resolver,
         ):
-            with pytest.raises(RuntimeError, match="Vault timeout"):
+            with pytest.raises(RuntimeError, match="oauth credential resolution failed") as exc_info:
                 await interceptor(request, handler)
+            assert exc_info.value.__cause__ is not None
+            assert "Vault timeout" in str(exc_info.value.__cause__)
 
         handler.assert_not_called()
 
@@ -423,8 +425,9 @@ class TestTokenInjectorInterceptorFallback:
             "deep_agent.aegra.mcp_auth.get_mcp_credential_resolver",
             return_value=mock_resolver,
         ):
-            with pytest.raises(ConnectionError, match="network down"):
+            with pytest.raises(RuntimeError, match="dcr credential resolution failed") as exc_info:
                 await interceptor(request, handler)
+            assert isinstance(exc_info.value.__cause__, ConnectionError)
 
         handler.assert_not_called()
 

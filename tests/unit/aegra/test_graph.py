@@ -35,6 +35,10 @@ class TestAgentFactory:
         mock_settings.LIFECYCLE_PERSISTENCE_ENABLED = False
         mock_settings.MEMORY_ENABLED = False
         mock_settings.PYTHON_LOG_LEVEL = "WARNING"
+        mock_settings.SAFETY_DANGEROUS_CONTENT = "BLOCK_MEDIUM_AND_ABOVE"
+        mock_settings.SAFETY_HATE_SPEECH = "BLOCK_MEDIUM_AND_ABOVE"
+        mock_settings.SAFETY_HARASSMENT = "BLOCK_LOW_AND_ABOVE"
+        mock_settings.SAFETY_SEXUALLY_EXPLICIT = "BLOCK_LOW_AND_ABOVE"
         with (
             patch("deep_agent.src.settings.settings", mock_settings),
             patch("deep_agent.src.pii.get_scrubber", return_value=None),
@@ -140,6 +144,8 @@ class TestAgentFactory:
         mock_user.access_token = "test_access_token"
         mock_user.refresh_token = "test_refresh_token"
         mock_user.identity = None
+        mock_user.display_name = None
+        mock_user.email = None
 
         mock_runtime = MagicMock()
         mock_runtime.user = mock_user

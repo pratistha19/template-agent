@@ -9,7 +9,9 @@ middleware API. Template-agent users never import or call this directly.
 
 from __future__ import annotations
 
+import contextvars
 import importlib
+import re
 from typing import Any
 
 from deep_agent.src.agent.config.middleware import ResolvedMiddlewareConfig
@@ -17,6 +19,40 @@ from deep_agent.src.settings import settings
 from deep_agent.utils.pylogger import get_python_logger
 
 logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
+
+_current_user_info: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar("_current_user_info", default=None)
+)
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_DELIMITER_RE = re.compile(r"[<>\[\]]")
+
+
+def _sanitize_identity_value(value: str) -> str:
+    """Strip control characters and delimiter characters from an identity value.
+
+    Prevents a crafted JWT claim from injecting newlines or fake XML/markdown
+    tags into the system message.
+    """
+    value = _CONTROL_CHAR_RE.sub("", value)
+    value = _DELIMITER_RE.sub("", value)
+    return value.strip()
+
+
+def set_user_info(
+    *,
+    user_id: str | None = None,
+    display_name: str | None = None,
+    email: str | None = None,
+) -> None:
+    """Store the current user's identity fields for system-prompt injection.
+
+    Values are sanitized at storage time to strip control characters and
+    delimiter characters that could be used to inject fake instructions.
+    """
+    raw = {"user_id": user_id, "display_name": display_name, "email": email}
+    info = {k: _sanitize_identity_value(v) for k, v in raw.items() if v}
+    _current_user_info.set(info or None)
 
 
 def build_audit_middleware(
@@ -54,6 +90,55 @@ def build_opa_middleware() -> Any | None:
     from deep_agent.src.opa.middleware import OPAMiddleware
 
     return OPAMiddleware()
+
+
+def build_user_identity_middleware() -> Any | None:
+    """Build middleware that injects the current user's identity into the system prompt.
+
+    Reads from ``_current_user_info`` ContextVar at invocation time, so a
+    cached graph still picks up the correct user per request.
+    """
+    try:
+        from langchain.agents.middleware.types import (
+            AgentMiddleware,
+            ModelRequest,
+            ModelResponse,
+        )
+    except ImportError:
+        return None
+
+    class UserIdentityMiddleware(AgentMiddleware):
+        def _inject_identity(self, request: ModelRequest[Any]) -> ModelRequest[Any]:
+            info = _current_user_info.get()
+            if not info:
+                return request
+            from deepagents.middleware.subagents import append_to_system_message
+
+            parts = [f"  {k}: {v}" for k, v in info.items()]
+            identity_block = (
+                "<authenticated-user>\n" + "\n".join(parts) + "\n</authenticated-user>"
+            )
+
+            logger.info(
+                "UserIdentityMiddleware: injected user identity into system prompt"
+            )
+            return request.override(
+                system_message=append_to_system_message(
+                    request.system_message, identity_block
+                ),
+            )
+
+        def wrap_model_call(
+            self, request: ModelRequest[Any], handler: Any
+        ) -> ModelResponse[Any]:
+            return handler(self._inject_identity(request))
+
+        async def awrap_model_call(
+            self, request: ModelRequest[Any], handler: Any
+        ) -> ModelResponse[Any]:
+            return await handler(self._inject_identity(request))
+
+    return UserIdentityMiddleware()
 
 
 def _build_gemini_safety_log_middleware() -> Any | None:
@@ -188,6 +273,10 @@ def build_middleware_list(
     safety_mw = _build_gemini_safety_log_middleware()
     if safety_mw is not None:
         middlewares.append(safety_mw)
+
+    identity_mw = build_user_identity_middleware()
+    if identity_mw is not None:
+        middlewares.append(identity_mw)
 
     if not settings.MIDDLEWARE_ENABLED:
         logger.info("Middleware disabled via MIDDLEWARE_ENABLED=false")
